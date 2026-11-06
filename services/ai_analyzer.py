@@ -201,11 +201,14 @@ def _merge_chunk_records(records: list[dict], kind: str) -> list[dict]:
                             str(record.get("trip_date") or "").strip())
             else:
                 identity = ("exact", json.dumps(record, sort_keys=True, ensure_ascii=False))
-            if identity in by_trip_identity:
-                position = by_trip_identity[identity]
-                merged[position] = _merge_record(merged[position], record, "trip")
+            candidates = by_trip_identity.get(identity, [])
+            match = next((position for position in candidates
+                          if merged[position].get("_analysis_window") != record.get("_analysis_window")), None)
+            if match is not None:
+                merged[match] = _merge_record(merged[match], record, "trip")
             else:
-                by_trip_identity[identity] = len(merged)
+                position = len(merged)
+                by_trip_identity.setdefault(identity, []).append(position)
                 merged.append(dict(record))
             continue
 
@@ -216,7 +219,8 @@ def _merge_chunk_records(records: list[dict], kind: str) -> list[dict]:
         signature = tuple(str(record.get(field) or "").strip().casefold() for field in stable_fields)
         duplicate_index = None
         for index, existing in enumerate(merged):
-            if signature == tuple(str(existing.get(field) or "").strip().casefold() for field in stable_fields):
+            if (existing.get("_analysis_window") != record.get("_analysis_window")
+                    and signature == tuple(str(existing.get(field) or "").strip().casefold() for field in stable_fields)):
                 if pages and pages.intersection(_page_numbers(existing)):
                     duplicate_index = index
                     break
@@ -247,15 +251,22 @@ def merge_page_window_analyses(analyses: list[dict], filename: str,
         "passway_reimbursements": [],
         "unresolved_items": []
     }
-    for item in analyses:
+    for window_index, item in enumerate(analyses):
         for document in item.get("documents", []) or []:
             merged["documents"].append(document)
         for field in ("trips", "toll_reimbursements", "parking_reimbursements",
-                      "passway_reimbursements", "unresolved_items"):
-            merged[field].extend(item.get(field, []) or [])
+                      "passway_reimbursements"):
+            for record in item.get(field, []) or []:
+                marked = dict(record)
+                marked["_analysis_window"] = window_index
+                merged[field].append(marked)
+        merged["unresolved_items"].extend(item.get("unresolved_items", []) or [])
     merged["trips"] = _merge_chunk_records(merged["trips"], "trips")
     for field in ("toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
         merged[field] = _merge_chunk_records(merged[field], field)
+    for field in ("trips", "toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
+        for record in merged[field]:
+            record.pop("_analysis_window", None)
     unique_documents = {}
     for document in merged["documents"]:
         key = document.get("filename") or filename
