@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile Python modules
-        run: python -m compileall -q app.py services
+        run: python -m compileall -q app.py worker.py services
       - name: Check dashboard JavaScript syntax
         run: node --check static/app.js
       - name: Run processor unit tests
