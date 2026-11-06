@@ -10,6 +10,9 @@ const refreshButton = document.getElementById("refreshButton");
 const dropArea = document.getElementById("dropArea");
 
 let selectedPDFs = [];
+const MAX_FILES_PER_BATCH = 200;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+const MAX_BATCH_SIZE_BYTES = 1024 * 1024 * 1024;
 
 // --------------------------------------------------
 // GENERAL HELPERS
@@ -85,29 +88,26 @@ pdfInput.addEventListener("change", () => {
 function addSelectedFiles(files) {
     const incomingFiles = Array.from(files);
 
-    const validFiles = incomingFiles.filter(file =>
-        file.name.toLowerCase().endsWith(".pdf") &&
-        (!file.type || file.type === "application/pdf")
-    );
-
-    const invalidCount = incomingFiles.length - validFiles.length;
-
-    selectedPDFs = [
-        ...selectedPDFs,
-        ...validFiles
-    ];
-
-    if (invalidCount > 0) {
-        showMessage(
-            uploadMessage,
-            `${invalidCount} non-PDF file(s) were ignored.`,
-            "error"
-        );
-    } else {
-        showMessage(uploadMessage, "");
+    const invalid = [];
+    let added = 0;
+    for (const file of incomingFiles) {
+        if (!file.name.toLowerCase().endsWith('.pdf') || (file.type && file.type !== 'application/pdf')) {
+            invalid.push(file.name + ': not a PDF'); continue;
+        }
+        if (file.size > MAX_FILE_SIZE_BYTES) { invalid.push(file.name + ': exceeds 50 MB'); continue; }
+        const duplicate = selectedPDFs.some(existing => existing.name === file.name && existing.size === file.size && existing.lastModified === file.lastModified);
+        if (duplicate) continue;
+        if (selectedPDFs.length >= MAX_FILES_PER_BATCH) { invalid.push(file.name + ': batch limit is 200 PDFs'); continue; }
+        const currentBytes = selectedPDFs.reduce((sum, item) => sum + item.size, 0);
+        if (currentBytes + file.size > MAX_BATCH_SIZE_BYTES) { invalid.push(file.name + ': batch would exceed 1 GB'); continue; }
+        selectedPDFs.push(file); added += 1;
     }
-
-    renderSelectedFiles();
+    if (invalid.length) {
+        showMessage(uploadMessage, invalid.slice(0, 5).join(' · ') + (invalid.length > 5 ? ' · and ' + (invalid.length - 5) + ' more' : ''), 'error');
+    } else if (added) {
+        showMessage(uploadMessage, added + ' PDF(s) added to this batch.', 'success');
+    }
+    renderSelectedFiles();;
 }
 
 function renderSelectedFiles() {
