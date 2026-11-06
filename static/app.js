@@ -301,10 +301,6 @@ function renderBatches(batches) {
                     View Results
                 </button>
 
-                <button class="action-button"
-                    data-approve="${escapeHTML(batch.batch_id)}">
-                    Approve & Export
-                </button>
             </div>
         `;
 
@@ -315,7 +311,6 @@ function renderBatches(batches) {
 batchList.addEventListener("click", async event => {
     const analyzeButton = event.target.closest("[data-analyze]");
     const resultsButton = event.target.closest("[data-results]");
-    const approveButton = event.target.closest("[data-approve]");
 
     try {
         if (analyzeButton) {
@@ -324,10 +319,6 @@ batchList.addEventListener("click", async event => {
 
         if (resultsButton) {
             await loadResults(resultsButton.dataset.results);
-        }
-
-        if (approveButton) {
-            await approveBatch(approveButton.dataset.approve);
         }
 
     } catch (error) {
@@ -598,10 +589,6 @@ async function loadResults(batchId) {
         analysisResults.innerHTML = '<p class="empty-state">Batch status: ' +
             escapeHTML(state.status || "pending") + '.</p>';
     }
-}
-
-async function approveBatch(batchId) {
-    alert("Approval and Google Sheets export remain disabled. You can save review edits, but no data is exported.");
 }
 
 // INITIALIZATION
