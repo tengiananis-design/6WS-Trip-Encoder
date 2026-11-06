@@ -139,7 +139,16 @@ async def upload_documents(files: list[UploadFile] = File(...)):
 
 @app.get("/api/batches")
 async def list_batches():
+    from services import storage
     batches = []
+    if storage.shared_storage_enabled():
+        for key in storage.list_keys("uploads"):
+            if key.endswith("/batch.json"):
+                try:
+                    batches.append(storage.load_json(key))
+                except Exception:
+                    logger.warning("Could not read shared batch metadata at %s", key)
+        return {"batches": sorted(batches, key=lambda item: item.get("created_at", ""), reverse=True)}
     if not UPLOAD_DIR.exists():
         return {"batches": batches}
     for batch_dir in sorted(UPLOAD_DIR.iterdir(), reverse=True):
@@ -187,16 +196,22 @@ def _run_analysis_job(batch_id: str, batch_dir: Path):
 async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     from services.job_store import read_job, write_job
     batch_id = safe_batch_id(batch_id)
+    from services import storage
     batch_dir = UPLOAD_DIR / batch_id
     if not batch_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Batch not found.")
+        if storage.shared_storage_enabled() and storage.exists(f"uploads/{batch_id}/batch.json"):
+            batch_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            raise HTTPException(status_code=404, detail="Batch not found.")
     current = read_job(batch_dir)
     if current and current.get("status") == "processing":
         return {"message": "Analysis is already running.", "batch_id": batch_id, "job": current}
     if (RESULT_DIR / f"{batch_id}.json").is_file():
         raise HTTPException(status_code=409, detail="Analysis result already exists. Review it instead of running analysis again.")
-    total = len(list(batch_dir.glob("*.pdf")))
-    from services import storage
+    if storage.shared_storage_enabled() and storage.exists(f"uploads/{batch_id}/batch.json"):
+        total = int(storage.load_json(f"uploads/{batch_id}/batch.json").get("document_count", 0))
+    else:
+        total = len(list(batch_dir.glob("*.pdf")))
     if storage.shared_storage_enabled() and __import__("os").getenv("REDIS_URL"):
         from services.tasks import analyze_batch_task
         task = analyze_batch_task.apply_async(args=[batch_id])
@@ -217,10 +232,10 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
 async def get_analysis_job(batch_id: str):
     from services.job_store import read_job
     batch_id = safe_batch_id(batch_id)
-    batch_dir = UPLOAD_DIR / batch_id
-    if not batch_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Batch not found.")
     from services import storage
+    batch_dir = UPLOAD_DIR / batch_id
+    if not batch_dir.is_dir() and not (storage.shared_storage_enabled() and storage.exists(f"jobs/{batch_id}.json")):
+        raise HTTPException(status_code=404, detail="Batch not found.")
     if storage.shared_storage_enabled() and storage.exists(f"jobs/{batch_id}.json"):
         job = storage.load_json(f"jobs/{batch_id}.json")
         if job.get("task_id"):
