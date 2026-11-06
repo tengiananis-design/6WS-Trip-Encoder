@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import time
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_CHARS_PER_PAGE = 18000
 _client = None
+_LAST_GEMINI_REQUEST = 0.0
+_GEMINI_RATE_LOCK = threading.Lock()
 
 
 def get_ai_client():
@@ -74,10 +77,23 @@ EVIDENCE:
 """
 
 
+def _wait_for_gemini_rate_limit():
+    """Keep sequential batch calls below a configurable request rate."""
+    global _LAST_GEMINI_REQUEST
+    interval = max(0.0, float(os.getenv("GEMINI_REQUEST_INTERVAL_SECONDS", "4")))
+    with _GEMINI_RATE_LOCK:
+        now = time.monotonic()
+        wait = interval - (now - _LAST_GEMINI_REQUEST)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_GEMINI_REQUEST = time.monotonic()
+
+
 def _generate_with_retry(client, prompt: str):
     attempts = max(1, int(os.getenv("GEMINI_MAX_RETRIES", "3")))
     for attempt in range(attempts):
         try:
+            _wait_for_gemini_rate_limit()
             return client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
