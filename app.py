@@ -233,9 +233,12 @@ async def save_analysis_result(batch_id: str, result: dict):
     result_file = RESULT_DIR / f"{batch_id}.json"
     if not result_file.exists():
         raise HTTPException(status_code=404, detail="Analysis result not found.")
-    # Never allow a browser edit to bypass the review gate.
-    if result.get("approval_status") == "approved" and result.get("overall_review_required") is not False:
-        raise HTTPException(status_code=409, detail="Resolve all review flags before approval.")
+    # Validate the complete review state on the server, not only a browser boolean.
+    if result.get("approval_status") == "approved":
+        from services.approval import approval_issues
+        issues = approval_issues(result)
+        if issues:
+            raise HTTPException(status_code=409, detail=" ".join(issues))
     result["batch_id"] = batch_id
     temporary = RESULT_DIR / f"{batch_id}.json.tmp"
     temporary.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -252,8 +255,12 @@ async def approve_batch(batch_id: str):
     try:
         result = json.loads(result_file.read_text(encoding="utf-8"))
         from services.google_sheets import export_approved_batch
+        from services.approval import approval_issues
         if result.get("approval_status") != "approved":
             raise HTTPException(status_code=409, detail="Approval must be explicitly recorded after human review before export.")
+        issues = approval_issues(result)
+        if issues:
+            raise HTTPException(status_code=409, detail=" ".join(issues))
         export_result = await export_approved_batch(batch_id=batch_id, result=result)
         return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
     except HTTPException:
