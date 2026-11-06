@@ -216,8 +216,17 @@ def _run_analysis_job(batch_id: str, batch_dir: Path):
 
 @app.post("/api/analyze/{batch_id}")
 async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
-    from services.job_store import read_job, write_job
+    from services.approval_lock import approval_lock
     batch_id = safe_batch_id(batch_id)
+    try:
+        with approval_lock(batch_id):
+            return await _queue_analysis_locked(batch_id, background_tasks)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+
+
+async def _queue_analysis_locked(batch_id: str, background_tasks: BackgroundTasks):
+    from services.job_store import read_job, write_job
     from services import storage
     batch_dir = UPLOAD_DIR / batch_id
     if not batch_dir.is_dir():
