@@ -19,7 +19,7 @@ class ApprovalLockTests(unittest.TestCase):
     def test_redis_configuration_does_not_silently_fall_back_to_local_lock(self):
         with patch.dict("os.environ", {"REDIS_URL": "redis://unavailable.invalid:6379/0"}):
             with patch("redis.Redis.from_url", side_effect=ConnectionError("offline")):
-                with self.assertRaises(ConnectionError):
+                with self.assertRaises(RuntimeError):
                     with approval_lock("batch-3"):
                         self.fail("Should fail closed when distributed lock is unavailable.")
 
