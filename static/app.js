@@ -99,6 +99,9 @@ async function uploadDocuments() {
             uploadButton.textContent = \`Uploading \${Math.min(offset + chunk.length, files.length)} / \${files.length}...\`;
             const result = await apiRequest("/api/upload", {method: "POST", body: data});
             uploaded += result.uploaded_count || 0;
+            const completed = new Set(chunk);
+            selectedPDFs = selectedPDFs.filter(file => !completed.has(file));
+            renderSelectedFiles();
             showMessage(uploadMessage, \`Uploaded \${uploaded} of \${files.length} PDFs. Batch: \${batchId}\`, "success");
             if (result.rejected_files?.length) {
                 showMessage(uploadMessage, result.rejected_files.map(item => \`\${item.filename}: \${item.reason}\`).join(" · "), "error");
