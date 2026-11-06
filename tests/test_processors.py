@@ -68,6 +68,14 @@ class TripRuleTests(unittest.TestCase):
         self.assertEqual(trip["status"], "review_required")
         self.assertTrue(trip["review_flags"])
 
+    def test_segments_are_sorted_by_actual_departure_time(self):
+        trip = process_trip({"segments": [
+            {"origin": "MFM Pulilan", "destination": "SOC 6", "departure_time": "10:00", "movement_type": "outbound"},
+            {"origin": "SOC 6", "destination": "MFM Pulilan", "departure_time": "06:00", "movement_type": "return"},
+        ]})
+        self.assertEqual(trip["segments"][0]["departure_time"], "06:00")
+        self.assertEqual(trip["segments"][1]["departure_time"], "10:00")
+
 
 class ReimbursementTests(unittest.TestCase):
     def test_amount_normalization(self):
