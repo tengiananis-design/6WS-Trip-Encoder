@@ -8,506 +8,199 @@ const batchList = document.getElementById("batchList");
 const analysisResults = document.getElementById("analysisResults");
 const refreshButton = document.getElementById("refreshButton");
 const dropArea = document.getElementById("dropArea");
-
 let selectedPDFs = [];
-
-// --------------------------------------------------
-// GENERAL HELPERS
-// --------------------------------------------------
+const UPLOAD_CHUNK_SIZE = 3;
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 function showMessage(element, message, type = "") {
     element.textContent = message;
-    element.className = `message ${type}`;
+    element.className = \`message \${type}\`;
 }
-
 function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, character => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     })[character]);
 }
-
 async function apiRequest(url, options = {}) {
     const response = await fetch(url, options);
-
     const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-        throw new Error(
-            data.detail || `Request failed: ${response.status}`
-        );
-    }
-
+    if (!response.ok) throw new Error(data.detail || \`Request failed: \${response.status}\`);
     return data;
 }
-
-// --------------------------------------------------
-// SYSTEM STATUS
-// --------------------------------------------------
-
 async function checkSystem() {
     const statusText = document.getElementById("systemStatus");
     const dot = document.querySelector(".status-dot");
-
     try {
         const result = await apiRequest("/health");
-
-        statusText.textContent = result.status === "online"
-            ? "System Online"
-            : "System Unavailable";
-
-        dot.classList.toggle(
-            "online",
-            result.status === "online"
-        );
-
+        statusText.textContent = result.status === "online" ? "System Online" : "System Unavailable";
+        dot.classList.toggle("online", result.status === "online");
     } catch (error) {
         statusText.textContent = "Connection Error";
         dot.classList.remove("online");
     }
 }
-
-// --------------------------------------------------
-// FILE SELECTION
-// --------------------------------------------------
-
-selectButton.addEventListener("click", () => {
-    pdfInput.click();
-});
-
+selectButton.addEventListener("click", () => pdfInput.click());
 pdfInput.addEventListener("change", () => {
     addSelectedFiles(pdfInput.files);
+    pdfInput.value = "";
 });
-
 function addSelectedFiles(files) {
-    const incomingFiles = Array.from(files);
-
-    const validFiles = incomingFiles.filter(file =>
-        file.name.toLowerCase().endsWith(".pdf") &&
-        file.type === "application/pdf"
-    );
-
-    const invalidCount = incomingFiles.length - validFiles.length;
-
-    selectedPDFs = [
-        ...selectedPDFs,
-        ...validFiles
-    ];
-
-    if (invalidCount > 0) {
-        showMessage(
-            uploadMessage,
-            `${invalidCount} non-PDF file(s) were ignored.`,
-            "error"
-        );
-    } else {
-        showMessage(uploadMessage, "");
-    }
-
+    const incoming = Array.from(files);
+    const existing = new Set(selectedPDFs.map(file => \`\${file.name}:\${file.size}:\${file.lastModified}\`));
+    incoming.forEach(file => {
+        if (!file.name.toLowerCase().endsWith(".pdf")) return;
+        if (file.size > MAX_FILE_SIZE) {
+            showMessage(uploadMessage, \`\${file.name} exceeds 50 MB and was skipped.\`, "error");
+            return;
+        }
+        const key = \`\${file.name}:\${file.size}:\${file.lastModified}\`;
+        if (!existing.has(key)) selectedPDFs.push(file);
+    });
     renderSelectedFiles();
 }
-
 function renderSelectedFiles() {
     selectedFiles.innerHTML = "";
-
     selectedPDFs.forEach((file, index) => {
         const item = document.createElement("div");
         item.className = "file-item";
-
-        item.innerHTML = `
-            <span>${escapeHTML(file.name)}</span>
-            <span>${(file.size / 1024 / 1024).toFixed(2)} MB
-                <button type="button"
-                    class="action-button"
-                    data-remove="${index}">
-                    Remove
-                </button>
-            </span>
-        `;
-
+        item.innerHTML = \`<span>\${escapeHTML(file.name)}</span><span>\${(file.size / 1024 / 1024).toFixed(2)} MB
+            <button type="button" class="action-button" data-remove="\${index}">Remove</button></span>\`;
         selectedFiles.appendChild(item);
     });
-
     uploadButton.disabled = selectedPDFs.length === 0;
+    uploadButton.textContent = selectedPDFs.length ? \`Upload \${selectedPDFs.length} PDF(s)\` : "Upload Documents";
 }
-
 selectedFiles.addEventListener("click", event => {
     const button = event.target.closest("[data-remove]");
-
     if (!button) return;
-
-    const index = Number(button.dataset.remove);
-
-    selectedPDFs.splice(index, 1);
-
+    selectedPDFs.splice(Number(button.dataset.remove), 1);
     renderSelectedFiles();
 });
-
-// --------------------------------------------------
-// DRAG AND DROP
-// --------------------------------------------------
-
-dropArea.addEventListener("dragover", event => {
-    event.preventDefault();
-    dropArea.classList.add("dragover");
-});
-
-dropArea.addEventListener("dragleave", () => {
-    dropArea.classList.remove("dragover");
-});
-
+dropArea.addEventListener("dragover", event => { event.preventDefault(); dropArea.classList.add("dragover"); });
+dropArea.addEventListener("dragleave", () => dropArea.classList.remove("dragover"));
 dropArea.addEventListener("drop", event => {
-    event.preventDefault();
-    dropArea.classList.remove("dragover");
-
-    addSelectedFiles(event.dataTransfer.files);
+    event.preventDefault(); dropArea.classList.remove("dragover"); addSelectedFiles(event.dataTransfer.files);
 });
-
-// --------------------------------------------------
-// UPLOAD
-// --------------------------------------------------
-
 uploadButton.addEventListener("click", uploadDocuments);
-
 async function uploadDocuments() {
-    if (selectedPDFs.length === 0) return;
-
-    const formData = new FormData();
-
-    selectedPDFs.forEach(file => {
-        formData.append("files", file);
-    });
-
+    if (!selectedPDFs.length) return;
+    const files = [...selectedPDFs];
+    let batchId = null, uploaded = 0;
     uploadButton.disabled = true;
-    uploadButton.textContent = "Uploading...";
-
     try {
-        const result = await apiRequest("/api/upload", {
-            method: "POST",
-            body: formData
-        });
-
-        showMessage(
-            uploadMessage,
-            `${result.document_count} PDF(s) uploaded successfully. Batch: ${result.batch_id}`,
-            "success"
-        );
-
+        uploadButton.textContent = "Preparing batch...";
+        const batch = await apiRequest("/api/batches", {method: "POST"});
+        batchId = batch.batch_id;
+        for (let offset = 0; offset < files.length; offset += UPLOAD_CHUNK_SIZE) {
+            const chunk = files.slice(offset, offset + UPLOAD_CHUNK_SIZE);
+            const data = new FormData();
+            data.append("batch_id", batchId);
+            chunk.forEach(file => data.append("files", file));
+            uploadButton.textContent = \`Uploading \${Math.min(offset + chunk.length, files.length)} / \${files.length}...\`;
+            const result = await apiRequest("/api/upload", {method: "POST", body: data});
+            uploaded += result.uploaded_count || 0;
+            showMessage(uploadMessage, \`Uploaded \${uploaded} of \${files.length} PDFs. Batch: \${batchId}\`, "success");
+            if (result.rejected_files?.length) {
+                showMessage(uploadMessage, result.rejected_files.map(item => \`\${item.filename}: \${item.reason}\`).join(" · "), "error");
+            }
+        }
         selectedPDFs = [];
         renderSelectedFiles();
-
+        showMessage(uploadMessage, \`\${uploaded} PDF(s) uploaded. Batch: \${batchId}\`, "success");
         await loadBatches();
-
     } catch (error) {
-        showMessage(
-            uploadMessage,
-            error.message,
-            "error"
-        );
-
+        // Keep all files selected for a safe retry; server-side duplicate filenames
+        // are unique and will not overwrite earlier uploads.
+        showMessage(uploadMessage, \`Batch \${batchId || "not created"}: \${uploaded} PDF(s) uploaded. Retry remaining files after checking the batch. \${error.message}\`, "error");
+        await loadBatches();
     } finally {
         uploadButton.disabled = selectedPDFs.length === 0;
-        uploadButton.textContent = "Upload Documents";
+        uploadButton.textContent = selectedPDFs.length ? \`Retry upload (\${selectedPDFs.length} selected)\` : "Upload Documents";
     }
 }
-
-// --------------------------------------------------
-// BATCH INVENTORY
-// --------------------------------------------------
-
 refreshButton.addEventListener("click", loadBatches);
-
 async function loadBatches() {
-    batchList.innerHTML = `
-        <p class="empty-state">Loading batches...</p>
-    `;
-
+    batchList.innerHTML = \`<p class="empty-state">Loading batches...</p>\`;
     try {
         const result = await apiRequest("/api/batches");
-
         renderBatches(result.batches || []);
-
-        const batchCount = result.batches?.length || 0;
-
-        const documentCount = (result.batches || [])
-            .reduce((sum, batch) =>
-                sum + (batch.document_count || 0), 0
-            );
-
-        document.getElementById("batchCount").textContent =
-            batchCount;
-
-        document.getElementById("documentCount").textContent =
-            documentCount;
-
+        const batches = result.batches || [];
+        document.getElementById("batchCount").textContent = batches.length;
+        document.getElementById("documentCount").textContent = batches.reduce((sum, item) => sum + (item.document_count || 0), 0);
     } catch (error) {
-        batchList.innerHTML = `
-            <p class="empty-state">
-                ${escapeHTML(error.message)}
-            </p>
-        `;
+        batchList.innerHTML = \`<p class="empty-state">\${escapeHTML(error.message)}</p>\`;
     }
 }
-
 function renderBatches(batches) {
     batchList.innerHTML = "";
-
-    if (batches.length === 0) {
-        batchList.innerHTML = `
-            <p class="empty-state">
-                No uploaded batches yet.
-            </p>
-        `;
-
-        return;
+    if (!batches.length) {
+        batchList.innerHTML = \`<p class="empty-state">No uploaded batches yet.</p>\`; return;
     }
-
     batches.forEach(batch => {
         const card = document.createElement("div");
         card.className = "batch-card";
-
-        const files = (batch.documents || [])
-            .map(file => escapeHTML(file.filename))
-            .join(", ");
-
-        card.innerHTML = `
-            <div class="batch-header">
-                <h3>Batch ${escapeHTML(batch.batch_id)}</h3>
-                <span class="badge warning">
-                    ${escapeHTML(batch.status)}
-                </span>
-            </div>
-
-            <p class="batch-meta">
-                ${batch.document_count} document(s)
-                · ${escapeHTML(batch.created_at)}
-            </p>
-
-            <p class="batch-meta">
-                ${files}
-            </p>
-
-            <div class="batch-actions">
-                <button class="action-button"
-                    data-analyze="${escapeHTML(batch.batch_id)}">
-                    Analyze Documents
-                </button>
-
-                <button class="action-button"
-                    data-results="${escapeHTML(batch.batch_id)}">
-                    View Results
-                </button>
-
-                <button class="action-button"
-                    data-approve="${escapeHTML(batch.batch_id)}">
-                    Approve & Export
-                </button>
-            </div>
-        `;
-
+        const files = (batch.documents || []).map(file => escapeHTML(file.filename)).join(", ");
+        card.innerHTML = \`<div class="batch-header"><h3>Batch \${escapeHTML(batch.batch_id)}</h3>
+            <span class="badge warning">\${escapeHTML(batch.status)}</span></div>
+            <p class="batch-meta">\${batch.document_count} document(s) · \${escapeHTML(batch.created_at)}</p>
+            <p class="batch-meta">\${files}</p><div class="batch-actions">
+            <button class="action-button" data-analyze="\${escapeHTML(batch.batch_id)}">Analyze Documents</button>
+            <button class="action-button" data-results="\${escapeHTML(batch.batch_id)}">View Results</button>
+            <button class="action-button" data-approve="\${escapeHTML(batch.batch_id)}">Approve & Export</button></div>\`;
         batchList.appendChild(card);
     });
 }
-
 batchList.addEventListener("click", async event => {
-    const analyzeButton = event.target.closest("[data-analyze]");
-    const resultsButton = event.target.closest("[data-results]");
-    const approveButton = event.target.closest("[data-approve]");
-
+    const a = event.target.closest("[data-analyze]");
+    const v = event.target.closest("[data-results]");
+    const p = event.target.closest("[data-approve]");
     try {
-        if (analyzeButton) {
-            await analyzeBatch(analyzeButton.dataset.analyze);
-        }
-
-        if (resultsButton) {
-            await loadResults(resultsButton.dataset.results);
-        }
-
-        if (approveButton) {
-            await approveBatch(approveButton.dataset.approve);
-        }
-
-    } catch (error) {
-        alert(error.message);
-    }
+        if (a) await analyzeBatch(a.dataset.analyze);
+        if (v) await loadResults(v.dataset.results);
+        if (p) await approveBatch(p.dataset.approve);
+    } catch (error) { alert(error.message); }
 });
-
-// --------------------------------------------------
-// AI ANALYSIS
-// --------------------------------------------------
-
-async function analyzeBatch(batchId) {
-    if (!confirm("Start AI analysis for this batch?")) {
-        return;
-    }
-
-    analysisResults.innerHTML = `
-        <p class="empty-state">
-            AI analysis is running. Please wait...
-        </p>
-    `;
-
-    const result = await apiRequest(
-        `/api/analyze/${encodeURIComponent(batchId)}`,
-        { method: "POST" }
-    );
-
+async function analyzeBatch(id) {
+    if (!confirm("Start AI analysis for this batch?")) return;
+    analysisResults.innerHTML = \`<p class="empty-state">Extracting PDFs concurrently and analyzing. Large batches may take a few minutes...</p>\`;
+    const result = await apiRequest(\`/api/analyze/\${encodeURIComponent(id)}\`, {method: "POST"});
     renderAnalysis(result.result);
-
     alert("Analysis completed. Review the results carefully.");
 }
-
-// --------------------------------------------------
-// DISPLAY ANALYSIS
-// --------------------------------------------------
-
-async function loadResults(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
-    renderAnalysis(result);
+async function loadResults(id) {
+    renderAnalysis(await apiRequest(\`/api/results/\${encodeURIComponent(id)}\`));
 }
-
 function renderAnalysis(result) {
-    const trips = result.trips || [];
-    const tolls = result.toll_reimbursements || [];
-    const parking = result.parking_reimbursements || [];
-
-    const driverName = result.driver?.name || "Unidentified";
-
-    let html = `
-        <div class="result-section">
-            <h3>Driver Information</h3>
-            <div class="result-item">
-                <p><strong>Driver:</strong>
-                    ${escapeHTML(driverName)}
-                </p>
-                <p><strong>Documents:</strong>
-                    ${result.documents_processed || 0}
-                </p>
-                <p><strong>Approval:</strong>
-                    ${escapeHTML(result.approval_status || "pending_review")}
-                </p>
-            </div>
-        </div>
-
-        <div class="result-section">
-            <h3>Trip Records (${trips.length})</h3>
-    `;
-
-    trips.forEach((trip, index) => {
-        html += `
-            <div class="result-item">
-                <p><strong>Trip ${index + 1}</strong></p>
-                <p>Date: ${escapeHTML(trip.trip_date)}</p>
-                <p>Trip Ticket: ${escapeHTML(trip.trip_ticket_number)}</p>
-                <p>Line Haul: ${escapeHTML(trip.line_haul_trip_number)}</p>
-                <p>Origin: ${escapeHTML(trip.origin)}</p>
-                <p>Destination: ${escapeHTML(trip.destination)}</p>
-                <p>Segments: ${(trip.segments || []).length}</p>
-                <p>Review Flags:
-                    ${escapeHTML((trip.review_flags || []).join("; ") || "None")}
-                </p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Toll Reimbursements (${tolls.length})</h3>
-    `;
-
-    tolls.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Parking Reimbursements (${parking.length})</h3>
-    `;
-
-    parking.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Unresolved Items</h3>
-            <div class="result-item">
-                ${escapeHTML(
-                    (result.unresolved_items || []).join("; ") ||
-                    "No unresolved items reported."
-                )}
-            </div>
-        </div>
-    `;
-
+    const trips = result.trips || [], tolls = result.toll_reimbursements || [], parking = result.parking_reimbursements || [];
+    let html = \`<div class="result-section"><h3>Driver Information</h3><div class="result-item">
+        <p><strong>Driver:</strong> \${escapeHTML(result.driver?.name || "Unidentified")}</p>
+        <p><strong>Documents:</strong> \${result.documents_processed || 0} / \${result.documents_received || result.documents_processed || 0}</p>
+        <p><strong>Approval:</strong> \${escapeHTML(result.approval_status || "pending_review")}</p></div></div>
+        <div class="result-section"><h3>Trip Records (\${trips.length})</h3>\`;
+    trips.forEach((trip, i) => { html += \`<div class="result-item"><p><strong>Trip \${i+1}</strong></p>
+        <p>Date: \${escapeHTML(trip.trip_date)}</p><p>Trip Ticket: \${escapeHTML(trip.trip_ticket_number)}</p>
+        <p>Line Haul: \${escapeHTML(trip.line_haul_trip_number)}</p><p>Origin: \${escapeHTML(trip.origin)}</p>
+        <p>Destination: \${escapeHTML(trip.destination)}</p><p>Segments: \${(trip.segments || []).length}</p>
+        <p>Review Flags: \${escapeHTML((trip.review_flags || []).join("; ") || "None")}</p></div>\`; });
+    html += \`</div><div class="result-section"><h3>Toll Reimbursements (\${tolls.length})</h3>\`;
+    tolls.forEach(row => { html += \`<div class="result-item"><p>Date: \${escapeHTML(row.date)}</p><p>Location: \${escapeHTML(row.location)}</p><p>Amount: \${escapeHTML(row.amount)}</p></div>\`; });
+    html += \`</div><div class="result-section"><h3>Parking Reimbursements (\${parking.length})</h3>\`;
+    parking.forEach(row => { html += \`<div class="result-item"><p>Date: \${escapeHTML(row.date)}</p><p>Location: \${escapeHTML(row.location)}</p><p>Amount: \${escapeHTML(row.amount)}</p></div>\`; });
+    html += \`</div><div class="result-section"><h3>Unresolved Items</h3><div class="result-item">\${escapeHTML((result.unresolved_items || []).join("; ") || "No unresolved items reported.")}</div></div>\`;
     analysisResults.innerHTML = html;
 }
-
-// --------------------------------------------------
-// APPROVAL AND EXPORT
-// --------------------------------------------------
-
-async function approveBatch(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
+async function approveBatch(id) {
+    const result = await apiRequest(\`/api/results/\${encodeURIComponent(id)}\`);
     if (result.overall_review_required !== false) {
-        alert(
-            "This batch still requires review. " +
-            "The system will not approve it automatically."
-        );
-
-        return;
+        alert("This batch still requires review. Resolve all flagged items before export."); return;
     }
-
-    if (!confirm(
-        "Have you reviewed this batch and verified all records? " +
-        "Approval will export the data to Google Sheets."
-    )) {
-        return;
-    }
-
+    if (!confirm("Have you reviewed and verified every record? Approval will export to Google Sheets.")) return;
     result.approval_status = "approved";
-
-    // The backend must also persist this approval state
-    // before export. The current starter endpoint does not
-    // yet provide that operation, so export remains blocked
-    // until the approval API is implemented.
-    alert(
-        "Approval workflow is not yet enabled. " +
-        "Backend approval persistence must be implemented first."
-    );
+    await apiRequest(\`/api/results/\${encodeURIComponent(id)}\`, {
+        method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(result)
+    });
+    const exported = await apiRequest(\`/api/approve/\${encodeURIComponent(id)}\`, {method: "POST"});
+    alert(exported.message || "Export completed.");
 }
-
-// --------------------------------------------------
-// INITIALIZATION
-// --------------------------------------------------
-
-async function initializeDashboard() {
-    await checkSystem();
-    await loadBatches();
-}
-
+async function initializeDashboard() { await Promise.all([checkSystem(), loadBatches()]); }
 initializeDashboard();
