@@ -135,8 +135,10 @@ def analyze_documents(documents: list[dict]) -> dict[str, Any]:
     return result
 
 
-MAX_PAGES_PER_AI_REQUEST = 12
-PAGE_OVERLAP = 2
+MAX_PAGES_PER_AI_REQUEST = max(1, int(os.getenv("GEMINI_MAX_PAGES_PER_REQUEST", "12")))
+PAGE_OVERLAP = max(0, int(os.getenv("GEMINI_PAGE_OVERLAP", "2")))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "4")))
+GEMINI_REQUEST_DELAY_SECONDS = max(0.0, float(os.getenv("GEMINI_REQUEST_DELAY_SECONDS", "0")))
 
 
 def _page_windows(pages: list[dict], size: int = MAX_PAGES_PER_AI_REQUEST,
@@ -299,9 +301,11 @@ def merge_page_window_analyses(analyses: list[dict], filename: str,
     return merged
 
 
-async def analyze_documents_with_retry(documents: list[dict], attempts: int = 3) -> dict:
+async def analyze_documents_with_retry(documents: list[dict], attempts: int = GEMINI_MAX_ATTEMPTS) -> dict:
     last_error = None
     for attempt in range(attempts):
+        if GEMINI_REQUEST_DELAY_SECONDS:
+            await asyncio.sleep(GEMINI_REQUEST_DELAY_SECONDS)
         try:
             return await asyncio.to_thread(analyze_documents, documents)
         except Exception as error:
