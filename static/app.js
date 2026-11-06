@@ -25,7 +25,11 @@ function escapeHTML(value) {
 async function apiRequest(url, options = {}) {
     const response = await fetch(url, options);
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || `Request failed: ${response.status}`);
+    if (!response.ok) {
+        const error = new Error(data.detail || `Request failed: ${response.status}`);
+        error.status = response.status;
+        throw error;
+    }
     return data;
 }
 async function checkSystem() {
@@ -202,13 +206,13 @@ async function loadResults(id) {
         if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("The server returned an unexpected results format.");
         renderAnalysis(result);
     } catch (error) {
-        if (error.message.includes("404")) {
+        if (error.status === 404) {
             try {
                 const status = await apiRequest(`/api/analyze/${encodeURIComponent(id)}/status`);
                 if (status.status === "processing" || status.status === "queued") throw new Error("Analysis is still processing. Wait for it to finish, then select View Results again.");
                 if (status.status === "failed") throw new Error(`Analysis failed: ${status.message || "No result file was created."}`);
             } catch (statusError) {
-                if (!statusError.message.includes("404")) throw statusError;
+                if (statusError.status !== 404) throw statusError;
             }
             throw new Error("No saved analysis results exist for this batch yet. Select Analyze Documents first.");
         }
