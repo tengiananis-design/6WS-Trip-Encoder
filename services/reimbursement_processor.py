@@ -44,6 +44,7 @@ def normalize_expense(expense: dict, expense_type: str) -> dict:
         "date_of_or": expense.get("date_of_or"),
         "tag_number": _clean_identifier(expense.get("tag_number")),
         "amount": amount,
+        "source_filename": expense.get("source_filename"),
         "source_pages": expense.get("source_pages", []) or [],
         "review_flags": [],
     }

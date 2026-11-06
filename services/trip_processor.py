@@ -127,6 +127,8 @@ def process_trip(trip: dict) -> dict:
         "remarks": trip.get("remarks"),
         "late": trip.get("late"),
         "return_origin": normalize_location(trip.get("return_origin")) or None,
+        "source_filename": trip.get("source_filename"),
+        "source_pages": sorted({page for segment in segments for page in (segment.get("source_pages") or [])}),
         "segments": segments,
         "check_in_time_actual": trip.get("check_in_time_actual"),
         "docking_time": trip.get("docking_time"),

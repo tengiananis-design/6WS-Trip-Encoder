@@ -89,3 +89,26 @@ Never commit API keys, service-account credentials, or private driver documents 
 This starter project requires configuration and testing before production use.
 
 Always review extracted trip and reimbursement data before approving any Google Sheets export.
+
+
+## Security and source evidence
+
+- Set `APP_USERNAME` and `APP_PASSWORD` in the Render environment before exposing the dashboard. All routes except `/health` require HTTP Basic authentication. If credentials are absent, the app returns HTTP 503 rather than serving private driver documents publicly.
+- Each extracted record carries its source PDF filename and page numbers. The review screen renders those exact pages through an authenticated preview endpoint. Previews are returned with private/no-store caching.
+- Do not use a public bucket. Configure a private S3-compatible bucket with least-privilege access.
+
+## Durable background processing
+
+The durable worker mode requires all of the following on both web and worker services:
+- `REDIS_URL`
+- `S3_BUCKET`
+- S3-compatible credentials and optional `S3_ENDPOINT_URL` / `AWS_REGION`
+- `GEMINI_API_KEY`
+
+Worker start command:
+
+```bash
+celery -A worker.celery_app worker --loglevel=INFO --concurrency=1
+```
+
+The current Render Blueprint intentionally does not provision Redis, object storage, or a paid background worker. Those services must be chosen and cost-reviewed before enabling durable mode. Without the queue and bucket, the web app uses local background processing, which can be interrupted by a restart and is not suitable for production-scale batches.

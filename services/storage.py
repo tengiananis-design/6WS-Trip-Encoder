@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import ClientError
 
 
 class S3Storage:
@@ -35,8 +36,11 @@ class S3Storage:
         try:
             obj = self.client.get_object(Bucket=self.bucket, Key=key)
             return json.loads(obj["Body"].read().decode("utf-8"))
-        except self.client.exceptions.NoSuchKey:
-            return None
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise
 
     def put_file(self, key, path):
         self.client.upload_file(str(path), self.bucket, key)
