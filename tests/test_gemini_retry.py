@@ -17,7 +17,7 @@ class GeminiRetryTests(unittest.TestCase):
         ))
         client = SimpleNamespace(models=models)
 
-        with patch("services.ai_analyzer.time.sleep") as sleep, patch(
+        with patch.dict("os.environ", {"GEMINI_REQUEST_INTERVAL_SECONDS": "0"}), patch("services.ai_analyzer.time.sleep") as sleep, patch(
             "services.ai_analyzer.types.GenerateContentConfig", return_value={}
         ):
             actual = _generate_with_retry(client, "test prompt")
