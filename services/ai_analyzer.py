@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "2")), 4))
 DRIVER_ANALYSIS_WORKERS = max(1, min(int(os.getenv("DRIVER_ANALYSIS_WORKERS", "3")), 4))
+IDENTIFICATION_BATCH_SIZE = max(1, min(int(os.getenv("IDENTIFICATION_BATCH_SIZE", "10")), 20))
+IDENTIFICATION_WORKERS = max(1, min(int(os.getenv("IDENTIFICATION_WORKERS", "3")), 4))
 _client = None
 
 
@@ -78,6 +80,35 @@ Documents:
         if filename:
             by_filename[filename] = item
     return by_filename
+
+
+async def identify_documents_in_parallel(documents: list[dict]) -> tuple[dict, list[dict]]:
+    """Classify manageable file groups concurrently; isolate failed groups for review."""
+    chunks = [
+        documents[index:index + IDENTIFICATION_BATCH_SIZE]
+        for index in range(0, len(documents), IDENTIFICATION_BATCH_SIZE)
+    ]
+    semaphore = asyncio.Semaphore(IDENTIFICATION_WORKERS)
+
+    async def classify(chunk):
+        async with semaphore:
+            try:
+                return await asyncio.to_thread(identify_document_owners, chunk), None
+            except Exception as error:
+                logger.exception("Document identification chunk failed")
+                return {}, {
+                    "filenames": [item["filename"] for item in chunk],
+                    "error": str(error)
+                }
+
+    results = await asyncio.gather(*(classify(chunk) for chunk in chunks))
+    identified = {}
+    errors = []
+    for mapping, error in results:
+        identified.update(mapping)
+        if error:
+            errors.append(error)
+    return identified, errors
 
 
 def build_driver_prompt(driver_name: str, documents: list[dict]) -> str:
@@ -183,7 +214,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
 
     # First AI pass identifies each document's driver and type from short samples.
     # This prevents a single 100-PDF prompt and avoids mixing drivers.
-    identification = await asyncio.to_thread(identify_document_owners, extracted_documents)
+    identification, identification_errors = await identify_documents_in_parallel(extracted_documents)
     grouped = {}
     unidentified = []
     for document in extracted_documents:
@@ -278,11 +309,12 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
         "unresolved_items": [item for group in driver_results for item in group.get("unresolved_items", [])],
         "unidentified_documents": unidentified,
         "extraction_errors": extraction_errors,
+        "identification_errors": identification_errors,
         "documents_processed": len(extracted_documents),
         "documents_received": len(pdf_records),
         "analysis_model": GEMINI_MODEL,
         "approval_status": "pending_review",
-        "overall_review_required": bool(unidentified or extraction_errors or any(
+        "overall_review_required": bool(unidentified or extraction_errors or identification_errors or any(
             group.get("overall_review_required", True) for group in driver_results
         ))
     }
