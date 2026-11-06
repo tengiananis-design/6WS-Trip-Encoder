@@ -186,13 +186,23 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             group_analysis_requests += 1
             returned_driver = group_analysis.get("driver") or {}
             returned_name = returned_driver.get("name")
+            returned_confidence = returned_driver.get("confidence", "unknown")
             from services.driver_grouping import normalize_driver_name
-            if returned_name and normalize_driver_name(returned_name) != driver_name:
+            if not returned_name or normalize_driver_name(returned_name) != driver_name:
+                confidence = "low"
                 unresolved.append({
                     "type": "driver_identity_conflict",
                     "driver_group": driver_name,
                     "group_analysis_driver": returned_name,
-                    "message": "Combined document analysis returned a different driver identity; verify before approval."
+                    "message": "Combined document analysis did not independently confirm the grouped driver identity; verify before approval."
+                })
+            elif returned_confidence not in ("high", "verified"):
+                confidence = "medium"
+                unresolved.append({
+                    "type": "driver_group_confidence_low",
+                    "driver_group": driver_name,
+                    "confidence": returned_confidence,
+                    "message": "Combined document analysis did not return high confidence for this driver group."
                 })
             group_trips = group_analysis.get("trips") or []
             group_tolls = group_analysis.get("toll_reimbursements") or []
