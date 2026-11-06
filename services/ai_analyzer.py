@@ -168,7 +168,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             failed_pages = [
                 page.get("page_number")
                 for page in pages
-                if page.get("status") == "failed" or not str(page.get("text") or "").strip()
+                if page.get("status") == "failed" or page.get("error") or not str(page.get("text") or "").strip()
             ]
             if failed_pages:
                 extraction_errors.append({
