@@ -61,8 +61,12 @@ def read_json(path):
 
 
 def durable_storage():
+    # Use remote object storage only when the Redis worker queue is also enabled.
+    # Otherwise files must remain local so the development fallback can read them.
+    if not (os.getenv("REDIS_URL") and os.getenv("S3_BUCKET")):
+        return None
     from services.storage import S3Storage
-    return S3Storage.from_environment(required=False)
+    return S3Storage.from_environment(required=True)
 
 
 def durable_queue_enabled():
