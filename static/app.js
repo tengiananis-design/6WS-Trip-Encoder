@@ -81,6 +81,10 @@ function renderBatches(batches) {
         card.innerHTML = `<div class="batch-header"><h3>Batch ${escapeHTML(batch.batch_id)}</h3><span class="badge warning">${escapeHTML(batch.status)}</span></div>
         <p class="batch-meta">${batch.document_count} document(s) · ${escapeHTML(batch.created_at)}</p>
         <p class="batch-meta">${(batch.documents||[]).map(f=>escapeHTML(f.filename)).join(", ")}</p>
+        <details class="assignment-panel"><summary>Assign PDFs to drivers (optional)</summary>
+        <p>For a toll, parking, or other PDF that does not show a driver's name, enter its stored filename and the correct driver name. Leave other entries blank.</p>
+        <textarea data-assignments-input="${escapeHTML(batch.batch_id)}" rows="6" style="width:100%;font-family:monospace">${escapeHTML(JSON.stringify(Object.fromEntries((batch.documents||[]).map(f=>[f.filename,""])),null,2))}</textarea>
+        <button class="action-button" data-save-assignments="${escapeHTML(batch.batch_id)}">Save Driver Assignments</button></details>
         <div class="batch-actions"><button class="action-button" data-analyze="${escapeHTML(batch.batch_id)}">Analyze Documents</button>
         <button class="action-button" data-results="${escapeHTML(batch.batch_id)}">View Results</button>
         <button class="action-button" data-approve="${escapeHTML(batch.batch_id)}">Approve & Export</button></div>`;
@@ -88,10 +92,29 @@ function renderBatches(batches) {
     });
 }
 batchList.addEventListener("click", async event => {
-    const a=event.target.closest("[data-analyze]"), r=event.target.closest("[data-results]"), p=event.target.closest("[data-approve]");
-    try { if(a) await analyzeBatch(a.dataset.analyze); if(r) await loadResults(r.dataset.results); if(p) await approveBatch(p.dataset.approve); }
+    const a=event.target.closest("[data-analyze]"), r=event.target.closest("[data-results]"), p=event.target.closest("[data-approve]"), s=event.target.closest("[data-save-assignments]");
+    try { if(s) await saveDriverAssignments(s.dataset.saveAssignments); if(a) await analyzeBatch(a.dataset.analyze); if(r) await loadResults(r.dataset.results); if(p) await approveBatch(p.dataset.approve); }
     catch(error) { alert(error.message); }
 });
+async function saveDriverAssignments(batchId) {
+    const editor = Array.from(document.querySelectorAll("[data-assignments-input]"))
+        .find(node => node.dataset.assignmentsInput === batchId);
+    if (!editor) throw new Error("Assignment editor not found.");
+    let assignments;
+    try { assignments = JSON.parse(editor.value); }
+    catch { throw new Error("Invalid assignment JSON. Check commas, quotes, and brackets."); }
+    if (!assignments || typeof assignments !== "object" || Array.isArray(assignments)) {
+        throw new Error("Assignments must be a JSON object mapping filenames to driver names.");
+    }
+    const filled = Object.fromEntries(Object.entries(assignments).filter(([,name]) => String(name||"").trim()));
+    const result = await apiRequest(`/api/assignments/${encodeURIComponent(batchId)}`, {
+        method:"PUT",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({assignments:filled})
+    });
+    alert(result.message + ` (${result.assignment_count} assignment(s) saved.)`);
+}
+
 async function analyzeBatch(batchId) {
     if (!confirm("Start AI analysis for this batch?")) return;
     analysisResults.innerHTML = '<div class="result-section"><h3>Processing documents</h3><p id="jobProgressText">Queueing analysis...</p><progress id="jobProgressBar" max="100" value="0" style="width:100%"></progress></div>';
