@@ -68,6 +68,16 @@ class PageWindowTests(unittest.TestCase):
         ]
         self.assertEqual(len(_merge_chunk_records(rows, "toll_reimbursements")), 2)
 
+    def test_conflicting_driver_ids_across_windows_require_review(self):
+        merged = merge_page_window_analyses([
+            {"driver": {"name": "Sample Driver", "id": "100"},
+             "documents": [{"filename": "ticket.pdf", "document_type": "trip_ticket", "pages_used": [1]}]},
+            {"driver": {"name": "Sample Driver", "id": "200"},
+             "documents": [{"filename": "ticket.pdf", "document_type": "trip_ticket", "pages_used": [11]}]}
+        ], "ticket.pdf", 20)
+        self.assertTrue(merged["chunked_analysis_review_required"])
+        self.assertEqual(merged["unresolved_items"][0]["driver_id_candidates"], ["100", "200"])
+
     def test_chunked_document_is_flagged_for_human_review(self):
         merged = merge_page_window_analyses([
             {"driver": {"name": "Sample Driver"},
