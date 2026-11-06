@@ -221,7 +221,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None,
         raise RuntimeError("No PDF documents could be analyzed successfully.")
 
     from services.driver_grouping import group_documents_by_driver
-    grouping = group_documents_by_driver(extracted_documents)
+    grouping = group_documents_by_driver(extracted_documents, manual_assignments)
     analyses_by_filename = {item["document"]["filename"]: item["analysis"] for item in per_document_analyses}
 
     groups = []
