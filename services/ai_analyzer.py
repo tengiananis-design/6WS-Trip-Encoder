@@ -245,7 +245,11 @@ def merge_page_window_analyses(analyses: list[dict], filename: str,
         normalize_driver_name(item.get("name"))
         for item in drivers if isinstance(item, dict) and item.get("name")
     }
-    conflicts = len(driver_names) > 1
+    driver_ids = {
+        str(item.get("id")).strip().casefold()
+        for item in drivers if isinstance(item, dict) and item.get("id") not in (None, "")
+    }
+    conflicts = len(driver_names) > 1 or len(driver_ids) > 1
     merged = {
         "driver": driver,
         "documents": [],
@@ -296,7 +300,8 @@ def merge_page_window_analyses(analyses: list[dict], filename: str,
         merged.setdefault("unresolved_items", []).append({
             "filename": filename,
             "reason": "Conflicting driver identities were returned by different page windows.",
-            "driver_candidates": sorted(driver_names)
+            "driver_candidates": sorted(driver_names),
+            "driver_id_candidates": sorted(driver_ids)
         })
     return merged
 
