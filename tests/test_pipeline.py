@@ -32,6 +32,8 @@ class PipelineValidationTests(unittest.TestCase):
             [trip["driver_name"] for trip in validated["trips"]],
             ["JUAN DELA CRUZ", "PEDRO SANTOS"],
         )
+        self.assertEqual(len(validated["driver_groups"][0]["trips"]), 1)
+        self.assertEqual(validated["driver_groups"][0]["trips"][0]["driver_name"], "JUAN DELA CRUZ")
         self.assertFalse(validated["overall_review_required"])
 
     def test_extraction_errors_always_require_review(self):
