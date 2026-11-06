@@ -1,4 +1,3 @@
-
 services:
   - type: web
     name: 6ws-trip-encoder
@@ -6,28 +5,9 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GOOGLE_SHEETS_ID
-        sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_JSON
-        sync: false
-
       - key: APP_USERNAME
         sync: false
       - key: APP_PASSWORD
         sync: false
-      - key: REDIS_URL
-        sync: false
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ENDPOINT_URL
-        sync: false
-      - key: AWS_REGION
-        sync: false
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
+      - key: GEMINI_API_KEY
         sync: false
