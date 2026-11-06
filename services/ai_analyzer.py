@@ -121,7 +121,7 @@ Return JSON with this schema:
  "toll_reimbursements":[{"driver_name":""" + json.dumps(driver_name) + ""","date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}],
  "parking_reimbursements":[{"driver_name":""" + json.dumps(driver_name) + ""","date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}],
  "unresolved_items":[],
- "overall_review_required":true
+ "overall_review_required":false
 }
 Source documents:
 """ + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -209,6 +209,26 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                 analysis["driver"]["name"] = driver_name
                 analysis["document_count"] = len(driver_docs)
                 analysis["source_documents"] = [doc["filename"] for doc in driver_docs]
+                # Enforce the review gate from concrete flags, even if the model
+                # forgets to set the batch-level boolean correctly.
+                flagged_records = []
+                for collection in ("trips", "toll_reimbursements", "parking_reimbursements"):
+                    for record in analysis.get(collection, []):
+                        if record.get("review_flags") or record.get("confidence") == "low":
+                            flagged_records.append(record)
+                failed_pages = [
+                    f"{doc['filename']} page {page['page_number']}"
+                    for doc in driver_docs for page in doc.get("pages", [])
+                    if page.get("status") == "failed" or not (page.get("text") or "").strip()
+                ]
+                analysis["overall_review_required"] = bool(
+                    analysis.get("unresolved_items") or flagged_records or failed_pages
+                    or analysis.get("overall_review_required", False)
+                )
+                if failed_pages:
+                    analysis.setdefault("unresolved_items", []).extend(
+                        f"OCR/text extraction empty or failed: {item}" for item in failed_pages
+                    )
                 return analysis
             except Exception as error:
                 logger.exception("Driver analysis failed for %s", driver_name)
