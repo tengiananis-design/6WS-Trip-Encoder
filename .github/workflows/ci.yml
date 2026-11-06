@@ -26,6 +26,17 @@ jobs:
         run: |
           docker run --detach --rm --name 6ws-ci -p 10000:10000 -e APP_USERNAME=ci -e APP_PASSWORD=ci-secret -e GEMINI_API_KEY=ci-placeholder 6ws-trip-encoder:ci
           trap 'docker stop 6ws-ci >/dev/null 2>&1 || true' EXIT
-          curl --fail --retry 20 --retry-delay 1 --retry-connrefused http://127.0.0.1:10000/health
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:10000/health; then
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' 6ws-ci)" != "true" ]; then
+              docker logs 6ws-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs 6ws-ci
+          exit 1
       - name: Run processor unit tests
         run: python -m unittest discover -s tests -v
