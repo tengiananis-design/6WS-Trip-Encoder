@@ -259,9 +259,11 @@ async def get_analysis_result(batch_id: str):
 
 @app.put("/api/review/{batch_id}")
 async def save_reviewed_result(batch_id: str, request: Request):
+    from services import storage
     batch_id = safe_batch_id(batch_id)
+    result_key = f"results/{batch_id}.json"
     result_file = RESULT_DIR / f"{batch_id}.json"
-    if not result_file.is_file():
+    if not (result_file.is_file() or (storage.shared_storage_enabled() and storage.exists(result_key))):
         raise HTTPException(status_code=404, detail="Analysis result not found.")
     try:
         payload = await request.json()
@@ -300,18 +302,23 @@ async def save_reviewed_result(batch_id: str, request: Request):
             for group in reviewed.get("driver_groups", [])
         )
     )
-    temp_file = result_file.with_suffix(".tmp")
-    temp_file.write_text(json.dumps(reviewed, indent=2, ensure_ascii=False), encoding="utf-8")
-    temp_file.replace(result_file)
+    if storage.shared_storage_enabled():
+        storage.save_json(result_key, reviewed)
+    else:
+        temp_file = result_file.with_suffix(".tmp")
+        temp_file.write_text(json.dumps(reviewed, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.replace(result_file)
     return {"message": "Reviewed result saved. It remains unapproved until separately approved.", "batch_id": batch_id, "overall_review_required": reviewed["overall_review_required"]}
 
 
 
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str, request: Request):
+    from services import storage
     batch_id = safe_batch_id(batch_id)
+    result_key = f"results/{batch_id}.json"
     result_file = RESULT_DIR / f"{batch_id}.json"
-    if not result_file.is_file():
+    if not (result_file.is_file() or (storage.shared_storage_enabled() and storage.exists(result_key))):
         raise HTTPException(status_code=404, detail="No analysis result available.")
 
     try:
@@ -322,7 +329,7 @@ async def approve_batch(batch_id: str, request: Request):
     if confirmation.get("review_confirmed") is not True:
         raise HTTPException(status_code=400, detail="Explicit human review confirmation is required.")
 
-    result = json.loads(result_file.read_text(encoding="utf-8"))
+    result = storage.load_json(result_key) if storage.shared_storage_enabled() else json.loads(result_file.read_text(encoding="utf-8"))
     if result.get("overall_review_required") is not False:
         raise HTTPException(status_code=409, detail="This batch still has unresolved review flags.")
     if result.get("approval_status") in ("exported", "exporting", "export_failed_manual_reconciliation"):
@@ -331,20 +338,29 @@ async def approve_batch(batch_id: str, request: Request):
     result["approval_status"] = "exporting"
     result["approved_at"] = datetime.now(timezone.utc).isoformat()
     result["export_started_at"] = datetime.now(timezone.utc).isoformat()
-    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    if storage.shared_storage_enabled():
+        storage.save_json(result_key, result)
+    else:
+        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     try:
         from services.google_sheets import export_approved_batch
         export_result = await export_approved_batch(batch_id=batch_id, result=result)
         result["approval_status"] = "exported"
         result["export_result"] = export_result
-        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        if storage.shared_storage_enabled():
+            storage.save_json(result_key, result)
+        else:
+            result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
     except Exception as error:
         logger.exception("Export failed for approved batch %s", batch_id)
         result["approval_status"] = "export_failed_manual_reconciliation"
         result["export_error"] = str(error)
-        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        if storage.shared_storage_enabled():
+            storage.save_json(result_key, result)
+        else:
+            result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         raise HTTPException(status_code=502, detail=f"Approval saved, but export failed: {error}")
 
 
