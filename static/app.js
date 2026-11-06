@@ -94,9 +94,23 @@ batchList.addEventListener("click", async event => {
 });
 async function analyzeBatch(batchId) {
     if (!confirm("Start AI analysis for this batch?")) return;
-    analysisResults.innerHTML = '<p class="empty-state">AI analysis is running. Please wait...</p>';
-    const result = await apiRequest(`/api/analyze/${encodeURIComponent(batchId)}`, {method:"POST"});
-    renderAnalysis(result.result); alert("Analysis completed. Review all records carefully.");
+    analysisResults.innerHTML = '<div class="result-section"><h3>Processing documents</h3><p id="jobProgressText">Queueing analysis...</p><progress id="jobProgressBar" max="100" value="0" style="width:100%"></progress></div>';
+    await apiRequest(`/api/analyze/${encodeURIComponent(batchId)}`, {method:"POST"});
+    await pollAnalysisJob(batchId);
+}
+async function pollAnalysisJob(batchId) {
+    while (true) {
+        const job = await apiRequest(`/api/jobs/${encodeURIComponent(batchId)}`);
+        const total = Number(job.total_documents || 0);
+        const done = Number(job.completed_documents || 0);
+        const textNode = document.getElementById("jobProgressText");
+        const bar = document.getElementById("jobProgressBar");
+        if (textNode) textNode.textContent = `${job.status || "queued"} — ${done}/${total} PDFs processed${job.current_filename ? " · " + job.current_filename : ""}`;
+        if (bar) bar.value = total ? Math.round(done / total * 100) : 0;
+        if (job.status === "completed") { await loadResults(batchId); return; }
+        if (job.status === "failed") throw new Error(job.error || "Analysis failed.");
+        await new Promise(resolve => setTimeout(resolve, 2500));
+    }
 }
 async function loadResults(batchId) { renderAnalysis(await apiRequest(`/api/results/${encodeURIComponent(batchId)}`)); }
 function renderAnalysis(result) {
