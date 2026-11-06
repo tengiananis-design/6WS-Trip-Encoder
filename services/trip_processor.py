@@ -36,45 +36,39 @@ def contains_mfm_token(location: str) -> bool:
     )
 
 
+def soc_identifier(location: str) -> str | None:
+    match = re.search(r"\b(SOC\s*\d+)\b", location, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", match.group(1)).upper() if match else None
+
+
 def is_soc_location(location: str) -> bool:
-    """Identify locations beginning with an SOC identifier."""
-
-    return bool(
-        re.search(
-            r"\bSOC\s*\d+\b",
-            location,
-            flags=re.IGNORECASE
-        )
-    )
+    """Identify locations containing an SOC identifier."""
+    return soc_identifier(location) is not None
 
 
-def determine_movement_type(
-    origin: str,
-    destination: str
-) -> str:
-    """
-    Classify movements using the agreed backload rule.
-    """
-
+def determine_movement_type(origin: str, destination: str) -> str:
+    """Apply route rules independently of the AI's suggested movement label."""
     origin = normalize_location(origin)
     destination = normalize_location(destination)
-
     if not origin or not destination:
         return "unknown"
 
-    if is_soc_location(origin):
-        return "outbound"
+    origin_soc = soc_identifier(origin)
+    destination_soc = soc_identifier(destination)
 
     if (
-        not is_soc_location(origin)
-        and not is_soc_location(destination)
-        and contains_mfm_token(destination)
+        origin_soc
+        and destination_soc
+        and origin_soc == destination_soc
+        and re.search(r"\bPARKING\b", destination, flags=re.IGNORECASE)
     ):
-        return "backload"
-
-    if is_soc_location(destination):
+        return "parking"
+    if destination_soc:
         return "return"
-
+    if origin_soc:
+        return "outbound"
+    if contains_mfm_token(destination):
+        return "backload"
     return "intermediate"
 
 
@@ -87,19 +81,17 @@ def normalize_segment(
         segment.get("destination")
     )
 
-    movement_type = segment.get("movement_type")
+    suggested_type = segment.get("movement_type")
+    route_type = determine_movement_type(origin, destination)
 
-    if movement_type not in {
-        "outbound",
-        "return",
-        "backload",
-        "parking",
-        "unknown"
-    }:
-        movement_type = determine_movement_type(
-            origin,
-            destination
-        )
+    # Route-derived classifications override model suggestions. SOC departures
+    # cannot be mislabeled as backloads; non-MFM legs cannot be backloads.
+    if route_type in {"outbound", "return", "backload", "parking", "unknown"}:
+        movement_type = route_type
+    elif suggested_type == "parking":
+        movement_type = "parking"
+    else:
+        movement_type = route_type
 
     return {
         "sequence": sequence,
