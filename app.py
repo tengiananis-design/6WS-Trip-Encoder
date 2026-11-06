@@ -91,7 +91,11 @@ async def application_status():
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "app_name": APP_NAME, "version": APP_VERSION})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"request": request, "app_name": APP_NAME, "version": APP_VERSION},
+    )
 
 
 @app.post("/api/batches")
