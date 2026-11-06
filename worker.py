@@ -19,8 +19,8 @@ celery_app.conf.update(task_track_started=True, task_acks_late=True,
                        worker_prefetch_multiplier=1, broker_connection_retry_on_startup=True)
 
 
-@celery_app.task(name="sixws.analyze_batch", bind=True, max_retries=2)
-def analyze_batch_task(self, batch_id):
+@celery_app.task(name="sixws.analyze_batch")
+def analyze_batch_task(batch_id):
     storage = S3Storage.from_environment(required=True)
     manifest = storage.get_json(f"batches/{batch_id}/manifest.json")
     if not manifest:
@@ -47,4 +47,5 @@ def analyze_batch_task(self, batch_id):
         logger.exception("Batch analysis failed: %s", batch_id)
         storage.put_json(f"batches/{batch_id}/status.json",
                          {"batch_id": batch_id, "status": "failed", "error": str(error)})
-        raise self.retry(exc=error, countdown=20)
+        # Do not automatically restart the entire batch: that would repeat already-billed AI calls.
+        # Individual page-window requests have their own bounded retry policy.
