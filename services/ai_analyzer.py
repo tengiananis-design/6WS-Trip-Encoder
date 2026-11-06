@@ -98,7 +98,7 @@ def _limit_page_text(pages: list[dict]) -> list[dict]:
     return limited
 
 
-async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
+async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None) -> dict[str, Any]:
     batch_dir = Path(batch_dir)
     pdf_files = sorted(path for path in batch_dir.glob("*.pdf") if path.is_file())
     if not pdf_files:
@@ -111,8 +111,11 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
     # Analyze each PDF independently first. This prevents documents belonging
     # to different drivers from being merged just because they were uploaded
     # in the same batch. Requests are deliberately sequential to limit API bursts.
-    for pdf_path in pdf_files:
+    total_files = len(pdf_files)
+    for file_index, pdf_path in enumerate(pdf_files, start=1):
         try:
+            if progress_callback:
+                progress_callback(file_index - 1, total_files, pdf_path.name)
             extraction = extract_complete_pdf(pdf_path)
             pages = _limit_page_text(extraction.get("pages", []))
             text = "\\n".join(str(page.get("text") or "") for page in pages)
@@ -130,9 +133,13 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
             document["driver"] = driver
             document["driver_name"] = driver.get("name")
             per_document_analyses.append({"document": document, "analysis": analysis})
+            if progress_callback:
+                progress_callback(file_index, total_files, pdf_path.name)
         except Exception as error:
             logger.exception("Failed to extract/analyze %s", pdf_path.name)
             extraction_errors.append({"filename": pdf_path.name, "error": str(error)})
+            if progress_callback:
+                progress_callback(file_index, total_files, pdf_path.name)
 
     if not per_document_analyses:
         raise RuntimeError("No PDF documents could be analyzed successfully.")
