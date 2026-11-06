@@ -113,3 +113,49 @@ The upload endpoint streams each file to disk and currently enforces a 100 MB pe
 ### Verification status
 
 The GitHub Actions unit-test workflow is configured for the development branch. A successful workflow run and end-to-end test with representative trip tickets, toll receipts, and parking receipts are still required before production use.
+
+
+## Distributed worker architecture (development branch)
+
+The branch now includes an optional Celery + Redis processing path and S3-compatible shared storage:
+
+- `services/celery_app.py` configures the Redis broker/backend.
+- `services/tasks.py` downloads a batch into isolated temporary worker storage, runs the existing PDF/AI pipeline, and saves the result to shared object storage.
+- `worker.py` is the independent worker entry point.
+- `services/storage.py` provides S3-compatible shared file and JSON storage, with local filesystem fallback for development.
+- The web API queues a Celery task only when both shared object storage and `REDIS_URL` are configured. Otherwise it explicitly uses the single-process local fallback.
+
+### Required environment configuration for distributed mode
+
+Configure these on both the web service and worker:
+
+- `REDIS_URL` — private connection string for a Redis-compatible queue.
+- `S3_BUCKET` — bucket name.
+- `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` — restricted bucket credentials.
+- `S3_ENDPOINT_URL` — provider endpoint when using an S3-compatible provider other than AWS.
+- `S3_REGION` — bucket region (defaults to `auto`).
+- Optional `S3_PREFIX` — defaults to `6ws`.
+
+Use a private Redis instance with a no-eviction policy for queue data. The worker requires access to the same object bucket as the web service. Do not put credentials in source control.
+
+### Render service setup
+
+The existing `render.yaml` intentionally remains a web-only free-plan configuration. It does not provision a Redis service or a worker, because those resources may incur charges and require an explicit budget decision.
+
+To enable distributed processing, create a separate Render Background Worker using this repository and branch, with start command:
+
+```bash
+python worker.py
+```
+
+Install the same environment variables on the web service and worker. Connect a private Redis-compatible queue and configure shared S3-compatible object storage first. Do not enable the distributed path until both services can access the same bucket and queue.
+
+Celery handles normal worker SIGTERM shutdown/draining; tasks use late acknowledgement, one-job prefetch, and bounded task time limits. The task can be retried after a worker loss, so external export actions remain separate from the analysis task.
+
+### Important limitations to resolve before live use
+
+- The upload API currently stages files on the web instance before copying them to shared storage. Large aggregate uploads should still be tested against request-size and timeout limits.
+- The S3-compatible storage provider and Redis instance are not provisioned by this branch.
+- The current job metadata file is a status snapshot; Celery remains the authoritative source for task state.
+- Google Sheets export is not part of the worker task. It remains an explicit, separate approval action.
+- The distributed queue has not yet been exercised end-to-end with real PDFs or a live Render worker.
