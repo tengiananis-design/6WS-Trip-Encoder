@@ -365,60 +365,54 @@ async def approve_batch(batch_id: str, request: Request):
 
 
 async def _approve_batch_locked(batch_id: str, request: Request):
-    from services.approval_lock import approval_lock
+    from services import storage
+    result_key = f"results/{batch_id}.json"
+    result_file = RESULT_DIR / f"{batch_id}.json"
+    if not (result_file.is_file() or (storage.shared_storage_enabled() and storage.exists(result_key))):
+        raise HTTPException(status_code=404, detail="No analysis result available.")
+
     try:
-        with approval_lock(batch_id):
-        from services import storage
-        batch_id = safe_batch_id(batch_id)
-        result_key = f"results/{batch_id}.json"
-        result_file = RESULT_DIR / f"{batch_id}.json"
-        if not (result_file.is_file() or (storage.shared_storage_enabled() and storage.exists(result_key))):
-            raise HTTPException(status_code=404, detail="No analysis result available.")
-    
-        try:
-            confirmation = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Approval confirmation is required.")
-    
-        if confirmation.get("review_confirmed") is not True:
-            raise HTTPException(status_code=400, detail="Explicit human review confirmation is required.")
-    
-        result = storage.load_json(result_key) if storage.shared_storage_enabled() else json.loads(result_file.read_text(encoding="utf-8"))
-        if result.get("overall_review_required") is not False:
-            raise HTTPException(status_code=409, detail="This batch still has unresolved review flags.")
-        if result.get("approval_status") in ("exported", "exporting", "export_failed_manual_reconciliation"):
-            raise HTTPException(status_code=409, detail="This batch is already exporting, exported, or needs manual reconciliation. Automatic retry is blocked to avoid duplicate spreadsheet rows.")
-    
-        result["approval_status"] = "exporting"
-        result["approved_at"] = datetime.now(timezone.utc).isoformat()
-        result["export_started_at"] = datetime.now(timezone.utc).isoformat()
+        confirmation = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Approval confirmation is required.")
+
+    if confirmation.get("review_confirmed") is not True:
+        raise HTTPException(status_code=400, detail="Explicit human review confirmation is required.")
+
+    result = storage.load_json(result_key) if storage.shared_storage_enabled() else json.loads(result_file.read_text(encoding="utf-8"))
+    if result.get("overall_review_required") is not False:
+        raise HTTPException(status_code=409, detail="This batch still has unresolved review flags.")
+    if result.get("approval_status") in ("exported", "exporting", "export_failed_manual_reconciliation"):
+        raise HTTPException(status_code=409, detail="This batch is already exporting, exported, or needs manual reconciliation. Automatic retry is blocked to avoid duplicate spreadsheet rows.")
+
+    result["approval_status"] = "exporting"
+    result["approved_at"] = datetime.now(timezone.utc).isoformat()
+    result["export_started_at"] = datetime.now(timezone.utc).isoformat()
+    if storage.shared_storage_enabled():
+        storage.save_json(result_key, result)
+    else:
+        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        from services.google_sheets import export_approved_batch
+        export_result = await export_approved_batch(batch_id=batch_id, result=result)
+        result["approval_status"] = "exported"
+        result["export_result"] = export_result
         if storage.shared_storage_enabled():
             storage.save_json(result_key, result)
         else:
             result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-    
-        try:
-            from services.google_sheets import export_approved_batch
-            export_result = await export_approved_batch(batch_id=batch_id, result=result)
-            result["approval_status"] = "exported"
-            result["export_result"] = export_result
-            if storage.shared_storage_enabled():
-                storage.save_json(result_key, result)
-            else:
-                result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-            return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
-        except Exception as error:
-            logger.exception("Export failed for approved batch %s", batch_id)
-            result["approval_status"] = "export_failed_manual_reconciliation"
-            result["export_error"] = str(error)
-            if storage.shared_storage_enabled():
-                storage.save_json(result_key, result)
-            else:
-                result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-            raise HTTPException(status_code=502, detail=f"Approval saved, but export failed: {error}")
-    
-    except RuntimeError as error:
-        raise HTTPException(status_code=409, detail=str(error))
+        return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
+    except Exception as error:
+        logger.exception("Export failed for approved batch %s", batch_id)
+        result["approval_status"] = "export_failed_manual_reconciliation"
+        result["export_error"] = str(error)
+        if storage.shared_storage_enabled():
+            storage.save_json(result_key, result)
+        else:
+            result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        raise HTTPException(status_code=502, detail=f"Approval saved, but export failed: {error}")
+
 
 @app.get("/api")
 async def api_information():
