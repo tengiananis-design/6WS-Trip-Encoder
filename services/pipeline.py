@@ -39,7 +39,8 @@ def validate_analysis_result(result: dict) -> dict:
             )
         )
         or any(
-            group.get("driver", {}).get("confidence") not in ("high", "verified")
+            not group.get("driver", {}).get("name")
+            or group.get("driver", {}).get("confidence") not in ("high", "verified")
             for group in result.get("driver_groups", [])
         )
     )
