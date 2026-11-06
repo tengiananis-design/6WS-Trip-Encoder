@@ -51,7 +51,7 @@ def prepare_trip_rows(result: dict) -> list[list[Any]]:
     for trip in result.get("trips", []):
         for segment in trip.get("segments", []):
             rows.append([
-                result.get("driver", {}).get("name"), trip.get("trip_date"),
+                trip.get("driver_name") or result.get("driver", {}).get("name"), trip.get("trip_date"),
                 trip.get("trip_ticket_number"), trip.get("line_haul_trip_number"),
                 segment.get("sequence"), segment.get("origin"), segment.get("destination"),
                 segment.get("departure_time"), segment.get("arrival_time"),
@@ -71,7 +71,7 @@ async def export_approved_batch(batch_id: str, result: dict) -> dict:
     if result.get("approval_status") != "approved":
         raise ValueError("Batch must be approved before export.")
     service = get_sheets_service()
-    driver_name = result.get("driver", {}).get("name") or "UNKNOWN"
+    driver_name = result.get("driver", {}).get("name") or "MULTIPLE / SEE ROW DRIVER"
     exports = []
     try:
         exports.append(append_rows(service, TRIP_SHEET_NAME, prepare_trip_rows(result)))
