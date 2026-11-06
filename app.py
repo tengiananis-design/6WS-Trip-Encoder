@@ -20,7 +20,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(__import__("os").getenv("DATA_DIR", str(BASE_DIR / "data")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
-MAX_FILE_BYTES = 100 * 1024 * 1024
+MAX_UPLOAD_FILES = int(__import__("os").getenv("MAX_UPLOAD_FILES", "150"))
+MAX_FILE_BYTES = int(__import__("os").getenv("MAX_UPLOAD_SIZE_MB", "100")) * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
 
 for directory in (UPLOAD_DIR, RESULT_DIR):
@@ -79,6 +80,8 @@ async def dashboard(request: Request):
 async def upload_documents(files: list[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="No PDF files selected.")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail=f"Select no more than {MAX_UPLOAD_FILES} PDFs per batch.")
 
     batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
     batch_dir = UPLOAD_DIR / batch_id
@@ -107,7 +110,7 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                             header = chunk[:5]
                         total += len(chunk)
                         if total > MAX_FILE_BYTES:
-                            raise HTTPException(status_code=413, detail=f"{original_name} exceeds the 100 MB per-file limit.")
+                            raise HTTPException(status_code=413, detail=f"{original_name} exceeds the configured {MAX_FILE_BYTES // (1024 * 1024)} MB per-file limit.")
                         output.write(chunk)
 
                 if not header.startswith(b"%PDF"):
