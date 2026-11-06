@@ -222,7 +222,11 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             for d in group_docs
             for item in ((analyses_by_filename[d["filename"]].get("driver") or {}).get("evidence") or [])
         ]
-        confidence = "high" if confidences and all(value in ("high", "verified") for value in confidences) else "medium"
+        confidence = (
+            "high" if confidences and all(value in ("high", "verified") for value in confidences)
+            else "low" if any(value in ("low", "unknown", None) for value in confidences)
+            else "medium"
+        )
 
         # Once document identity is established, analyze all documents for that
         # driver together. This lets the model reconcile trip chronology and
@@ -243,7 +247,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
                     "message": "Combined document analysis did not independently confirm the grouped driver identity; verify before approval."
                 })
             elif returned_confidence not in ("high", "verified"):
-                confidence = "medium"
+                confidence = "low" if returned_confidence in ("low", "unknown", None) else "medium"
                 unresolved.append({
                     "type": "driver_group_confidence_low",
                     "driver_group": driver_name,
