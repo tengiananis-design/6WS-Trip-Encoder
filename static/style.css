@@ -404,3 +404,6 @@ footer {
 .source-page { margin: 0; min-width: 0; }
 .source-page figcaption { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
 .source-page img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: white; }
+
+.assignment-row { display: grid; gap: 8px; margin: 10px 0; }
+.assignment-row .secondary-button { justify-self: start; }

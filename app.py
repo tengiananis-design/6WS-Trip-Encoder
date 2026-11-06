@@ -32,6 +32,39 @@ CHUNK_SIZE = 1024 * 1024
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(APP_NAME)
 
+class DashboardAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        username = os.getenv("APP_USERNAME")
+        password = os.getenv("APP_PASSWORD")
+        if not username or not password:
+            return Response(
+                "Application access is not configured. Set APP_USERNAME and APP_PASSWORD.",
+                status_code=503
+            )
+        try:
+            scheme, encoded = request.headers.get("authorization", "").split(" ", 1)
+            if scheme.lower() != "basic":
+                raise ValueError("Unsupported authentication scheme")
+            supplied_user, supplied_password = base64.b64decode(encoded).decode("utf-8").split(":", 1)
+        except Exception:
+            return Response(
+                "Authentication required.",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="6WS Trip Encoder"'}
+            )
+        valid_user = hmac.compare_digest(supplied_user, username)
+        valid_password = hmac.compare_digest(supplied_password, password)
+        if not (valid_user and valid_password):
+            return Response(
+                "Invalid credentials.",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="6WS Trip Encoder"'}
+            )
+        return await call_next(request)
+
+
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 app.add_middleware(DashboardAuthMiddleware)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -380,6 +413,71 @@ async def get_analysis_status(batch_id: str):
     if not get_manifest(batch_id):
         raise HTTPException(status_code=404, detail="Batch not found.")
     return {"batch_id": batch_id, "status": "uploaded"}
+
+
+@app.post("/api/assign-driver/{batch_id}")
+async def assign_document_driver(batch_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    current = get_result(batch_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Completed analysis result not found.")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Assignment payload must be valid JSON.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Assignment payload must be a JSON object.")
+    filename = payload.get("filename")
+    driver_name = payload.get("driver_name")
+    if not isinstance(filename, str) or not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="A valid source PDF filename is required.")
+    if not isinstance(driver_name, str) or not driver_name.strip() or len(driver_name.strip()) > 160:
+        raise HTTPException(status_code=400, detail="Enter a driver name (maximum 160 characters).")
+
+    document_analyses = current.get("document_analyses")
+    if not isinstance(document_analyses, list):
+        raise HTTPException(status_code=409, detail="This batch does not contain reassignment-ready document analysis data. Re-run analysis.")
+    target = next((item for item in document_analyses
+                   if item.get("source_filename") == filename), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="PDF is not part of this analyzed batch.")
+
+    clean_name = re.sub(r"\\s+", " ", driver_name.strip())
+    previous_driver = target.get("driver") or {}
+    if isinstance(previous_driver, dict):
+        target["original_driver"] = target.get("original_driver") or previous_driver
+        target["driver"] = {**previous_driver, "name": clean_name, "confidence": "manual"}
+    else:
+        target["original_driver"] = target.get("original_driver") or {"name": str(previous_driver)}
+        target["driver"] = {"name": clean_name, "confidence": "manual"}
+    target["driver_assignment_source"] = "manual"
+    target["driver_assignment_status"] = "pending_review"
+    for document in target.get("documents", []):
+        document["driver"] = target["driver"]
+        document["driver_assignment_source"] = "manual"
+
+    from services.ai_analyzer import assemble_batch_result
+    rebuilt = assemble_batch_result(
+        batch_id,
+        document_analyses,
+        current.get("extraction_errors", []),
+        current.get("documents_total", len(document_analyses))
+    )
+    rebuilt["completed_at"] = current.get("completed_at")
+    rebuilt["job_status"] = current.get("job_status", "completed")
+    rebuilt["approval_status"] = "pending_review"
+    rebuilt["overall_review_required"] = True
+    rebuilt["manual_assignment_history"] = current.get("manual_assignment_history", []) + [{
+        "filename": filename,
+        "previous_driver": (previous_driver.get("name") if isinstance(previous_driver, dict) else previous_driver),
+        "assigned_driver": clean_name,
+        "assigned_at": utc_now()
+    }]
+    save_result(batch_id, rebuilt)
+    set_batch_status(batch_id, "review_saved", manual_assignment_updated_at=utc_now())
+    return {"batch_id": batch_id, "status": "review_saved",
+            "approval_status": "pending_review", "message": f"{filename} assigned to {clean_name}. Review the regrouped records."}
 
 
 @app.put("/api/review/{batch_id}")

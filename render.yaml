@@ -4,7 +4,7 @@ services:
     name: 6ws-trip-encoder
     runtime: docker
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"

@@ -428,6 +428,26 @@ function renderAnalysis(result, batchId) {
         '<p><strong>Extraction errors:</strong> ' + (result.extraction_errors || []).length + '</p></div>' +
         '<p class="review-note">Edit extracted fields below, then save. Source movement evidence and review flags are retained. Saving does not approve or export this batch.</p>';
 
+    const unidentifiedDocs = (result.grouping && result.grouping.unidentified_documents) || [];
+    if (unidentifiedDocs.length) {
+        const knownDrivers = (result.drivers || []).map(item =>
+            item.driver && typeof item.driver === "object" ? item.driver.name : item.driver
+        ).filter(Boolean);
+        html += '<div class="result-section"><h3>Unassigned documents (' + unidentifiedDocs.length +
+            ')</h3><p>Assign each document to the correct driver. A manual assignment overrides the extracted name but remains pending human review.</p>';
+        unidentifiedDocs.forEach((doc, docIndex) => {
+            const filename = doc.filename || "unknown.pdf";
+            html += '<div class="result-item assignment-row"><strong>' + escapeHTML(filename) +
+                '</strong><label class="review-field"><span>Driver name</span><input type="text" list="knownDriverNames" ' +
+                'data-assign-filename="' + escapeHTML(filename) + '" placeholder="Enter or select driver name"></label>' +
+                '<button type="button" class="secondary-button" data-assign-driver="' + docIndex +
+                '">Assign document</button><span class="message" data-assignment-message="' + docIndex + '"></span></div>';
+        });
+        html += '<datalist id="knownDriverNames">';
+        knownDrivers.forEach(name => { html += '<option value="' + escapeHTML(name) + '"></option>'; });
+        html += '</datalist></div>';
+    }
+
     reviewSections.forEach(section => {
         const rows = result[section.key] || [];
         html += '<div class="result-section"><h3>' + section.title + ' (' + rows.length + ')</h3>';
@@ -492,6 +512,38 @@ function renderAnalysis(result, batchId) {
         '<span id="reviewSaveMessage" class="message"></span>';
     analysisResults.innerHTML = html;
     document.getElementById("saveReviewButton").addEventListener("click", saveReviewEdits);
+    analysisResults.querySelectorAll("[data-assign-driver]").forEach(button => {
+        button.addEventListener("click", () => assignDocumentDriver(button));
+    });
+}
+
+async function assignDocumentDriver(button) {
+    const index = Number(button.dataset.assignDriver);
+    const message = analysisResults.querySelector('[data-assignment-message="' + index + '"]');
+    const row = button.closest(".assignment-row");
+    const nameInput = row?.querySelector("input[data-assign-filename]");
+    if (!nameInput || !nameInput.value.trim()) {
+        message.textContent = "Enter a driver name first.";
+        message.className = "message error";
+        return;
+    }
+    button.disabled = true;
+    message.textContent = "Saving assignment...";
+    try {
+        const response = await apiRequest("/api/assign-driver/" + encodeURIComponent(activeReviewBatchId), {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({filename: nameInput.dataset.assignFilename, driver_name: nameInput.value.trim()})
+        });
+        message.textContent = response.message || "Assignment saved.";
+        message.className = "message success";
+        await loadResults(activeReviewBatchId);
+    } catch (error) {
+        message.textContent = error.message;
+        message.className = "message error";
+    } finally {
+        button.disabled = false;
+    }
 }
 
 async function saveReviewEdits() {
