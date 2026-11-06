@@ -1,0 +1,27 @@
+# Git
+.git/
+.github/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+credentials/
+*.pem
+*.key
+
+# Local uploads and generated results
+data/
+*.pdf
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
