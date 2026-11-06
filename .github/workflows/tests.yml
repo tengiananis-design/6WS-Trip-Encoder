@@ -1,5 +1,9 @@
 name: 6WS backend tests
 
+concurrency:
+  group: 6ws-tests-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
