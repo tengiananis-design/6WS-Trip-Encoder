@@ -112,3 +112,18 @@ celery -A worker.celery_app worker --loglevel=INFO --concurrency=1
 ```
 
 The current Render Blueprint intentionally does not provision Redis, object storage, or a paid background worker. Those services must be chosen and cost-reviewed before enabling durable mode. Without the queue and bucket, the web app uses local background processing, which can be interrupted by a restart and is not suitable for production-scale batches.
+
+
+## Pre-test checklist
+
+Run the following from the repository root with Python 3.11 and the requirements installed:
+
+```bash
+python -m compileall -q app.py worker.py services
+node --check static/app.js
+python -m unittest discover -s tests -v
+```
+
+For the first end-to-end test, configure `APP_USERNAME`, `APP_PASSWORD`, and `GEMINI_API_KEY`. Upload a small representative set first: one trip ticket, one toll PDF, and one parking PDF, including at least one driver whose name is not readable so manual assignment can be exercised. Verify every extracted row against the displayed source page. Do not enable production export; it remains disabled.
+
+For 100+ PDFs, do not use the local background fallback. Configure and verify the private object bucket and Redis queue on both web and worker services first. The current pipeline still processes PDFs sequentially and makes one Gemini request per PDF, so the large-batch load/quota test remains a separate gate.
