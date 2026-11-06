@@ -110,6 +110,12 @@ function renderAnalysis(result) {
     html+='</div><div class="result-section"><h3>Parking Reimbursements ('+parking.length+')</h3>';
     parking.forEach(x=>{html+=`<div class="result-item"><p>Date: ${escapeHTML(x.date)}</p><p>Location: ${escapeHTML(x.location)}</p><p>Amount: ${escapeHTML(x.amount)}</p><p>Flags: ${escapeHTML((x.review_flags||[]).join("; "))}</p></div>`;});
     html+='</div><div class="result-section"><h3>Unresolved Items</h3><div class="result-item">'+escapeHTML((result.unresolved_items||[]).map(x=>typeof x==="string"?x:JSON.stringify(x)).join("; ")||"None reported.")+'</div></div>';
+    const batchId = result.batch_id || "";
+    html += `</div><div class="result-section"><h3>Human Review Editor</h3>
+    <p>Edit the JSON below to correct trip fields, driver grouping, reimbursements, or unresolved flags. Keep the JSON valid. Saving does not approve or export.</p>
+    <textarea id="reviewJson" rows="18" style="width:100%;font-family:monospace">${escapeHTML(JSON.stringify(result,null,2))}</textarea>
+    <button class="action-button" data-save-review="${escapeHTML(batchId)}">Save reviewed records</button>
+    <span id="reviewSaveMessage" role="status"></span></div>`;
     analysisResults.innerHTML=html;
 }
 async function approveBatch(batchId) {
@@ -121,3 +127,24 @@ async function approveBatch(batchId) {
 }
 async function initializeDashboard(){await checkSystem();await loadBatches();}
 initializeDashboard();
+
+analysisResults.addEventListener("click", async event => {
+    const button = event.target.closest("[data-save-review]");
+    if (!button) return;
+    const batchId = button.dataset.saveReview;
+    const message = document.getElementById("reviewSaveMessage");
+    try {
+        const reviewed = JSON.parse(document.getElementById("reviewJson").value);
+        const saved = await apiRequest(`/api/review/${encodeURIComponent(batchId)}`, {
+            method:"PUT",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({result:reviewed})
+        });
+        message.textContent = saved.message + (saved.overall_review_required ? " Outstanding review flags remain." : " Ready for explicit approval.");
+        message.className = saved.overall_review_required ? "message warning" : "message success";
+        await loadResults(batchId);
+    } catch(error) {
+        message.textContent = error instanceof SyntaxError ? "Invalid JSON. Check commas, quotes, and brackets." : error.message;
+        message.className = "message error";
+    }
+});
