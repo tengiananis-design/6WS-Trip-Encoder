@@ -177,10 +177,22 @@ batchList.addEventListener("click", async event => {
 });
 async function analyzeBatch(id) {
     if (!confirm("Start AI analysis for this batch?")) return;
-    analysisResults.innerHTML = `<p class="empty-state">Extracting PDFs concurrently and analyzing. Large batches may take a few minutes...</p>`;
-    const result = await apiRequest(`/api/analyze/${encodeURIComponent(id)}`, {method: "POST"});
-    renderAnalysis(result.result);
-    alert("Analysis completed. Review the results carefully.");
+    analysisResults.innerHTML = `<p class="empty-state">Analysis queued. You can keep this page open; progress will be checked automatically...</p>`;
+    await apiRequest(`/api/analyze/${encodeURIComponent(id)}`, {method: "POST"});
+    for (let attempt = 0; attempt < 1800; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const status = await apiRequest(`/api/analyze/${encodeURIComponent(id)}/status`);
+        if (status.status === "completed") {
+            await loadResults(id);
+            alert("Analysis completed. Review the results carefully.");
+            return;
+        }
+        if (status.status === "failed") {
+            throw new Error(`Analysis failed: ${status.message || "Unknown error"}`);
+        }
+        analysisResults.innerHTML = `<p class="empty-state">${escapeHTML(status.message || "Analysis is processing...")} Status: ${escapeHTML(status.status)}. Keep this page open or return to this batch later.</p>`;
+    }
+    throw new Error("Analysis is taking longer than expected. The job may still be running; use View Results after it completes.");
 }
 async function loadResults(id) {
     renderAnalysis(await apiRequest(`/api/results/${encodeURIComponent(id)}`));
