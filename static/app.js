@@ -342,10 +342,25 @@ async function analyzeBatch(batchId) {
 
 async function pollAnalysis(batchId) {
     analysisResults.innerHTML = '<p class="empty-state">Analysis queued. Waiting for the worker...</p>';
+    let consecutiveErrors = 0;
     while (true) {
-        const state = await apiRequest(`/api/results/${encodeURIComponent(batchId)}`);
+        let state;
+        try {
+            state = await apiRequest(`/api/results/${encodeURIComponent(batchId)}`);
+            consecutiveErrors = 0;
+        } catch (error) {
+            consecutiveErrors += 1;
+            if (consecutiveErrors >= 5) {
+                analysisResults.innerHTML = '<p class="empty-state">Connection to the processing service was interrupted. Your batch may still be running. Use View Results to reconnect.</p>';
+                return;
+            }
+            analysisResults.innerHTML = '<p class="empty-state">Temporarily unable to check progress. Retrying in 5 seconds (' +
+                consecutiveErrors + '/5)...</p>';
+            await wait(5000);
+            continue;
+        }
         if (state.status === "completed" && state.result) {
-            renderAnalysis(state.result);
+            renderAnalysis(state.result, batchId);
             await loadBatches();
             return;
         }
@@ -589,6 +604,8 @@ async function loadResults(batchId) {
         analysisResults.innerHTML = '<div class="result-item"><h3>Analysis ' +
             escapeHTML(state.status) + '</h3><p>' +
             escapeHTML(state.error || "The worker could not complete this batch.") + '</p></div>';
+    } else if (["queued", "processing"].includes(state.status)) {
+        await pollAnalysis(batchId);
     } else {
         analysisResults.innerHTML = '<p class="empty-state">Batch status: ' +
             escapeHTML(state.status || "pending") + '.</p>';
