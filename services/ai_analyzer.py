@@ -13,8 +13,9 @@ from google.genai import types
 from services.ocr_engine import extract_complete_pdf
 
 logger = logging.getLogger(__name__)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "2")), 8))
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "2")), 4))
+DRIVER_ANALYSIS_WORKERS = max(1, min(int(os.getenv("DRIVER_ANALYSIS_WORKERS", "3")), 4))
 _client = None
 
 
@@ -28,70 +29,106 @@ def get_ai_client():
     return _client
 
 
-def classify_document(filename: str, text: str) -> str:
-    combined = f"{filename} {text[:3000]}".lower()
-    if "parking reimbursement" in combined:
-        return "parking_reimbursement"
-    if "toll reimbursement" in combined:
-        return "toll_reimbursement"
-    if any(term in combined for term in ["trip ticket", "trip summary", "line haul", "runsheet", "task information"]):
-        return "trip_ticket"
-    return "unknown"
-
-
-def build_analysis_prompt(documents: list[dict]) -> str:
-    document_text = json.dumps(documents, ensure_ascii=False, separators=(",", ":"))
-    return f"""
-You are the document analysis engine for 6WS Trip Encoder.
-Analyze the supplied driver trip tickets and reimbursement documents.
-Return valid JSON only using the schema below.
-
-STRICT EVIDENCE RULES:
-- Never invent dates, times, locations, trip numbers, amounts, driver names or vehicle details.
-- Preserve source filename and PDF page number for every extracted fact.
-- Separate trip tickets, toll reimbursements and parking reimbursements.
-- Reconstruct movements using chronological evidence, not page order alone.
-- Identify SOC origins, intermediate hubs, destinations, returns and possible backloads.
-- Intermediate hubs belong in DROP OFFS. The farthest/last outbound hub before returning is DESTINATION.
-- Return movements must be represented separately.
-- A non-SOC to non-SOC movement is a possible backload only when the destination hub contains standalone token MFM, case-insensitive.
-- SOC to MFM is outbound, not a backload.
-- Do not merge documents for different drivers. If driver identity is uncertain, flag it.
-- Do not approve or export. Set overall_review_required true when any uncertainty exists.
-- If extracted text is incomplete or OCR failed, list the affected document/page in unresolved_items.
-
-JSON SCHEMA:
-{{
- "driver": {{"name": null, "confidence": "unknown", "evidence": []}},
- "documents": [{{"filename":"","document_type":"trip_ticket | toll_reimbursement | parking_reimbursement | unknown","pages_used":[],"notes":[]}}],
- "trips": [{{"trip_ticket_number":null,"line_haul_trip_number":null,"trip_date":null,"origin":null,"drop_offs":[],"destination":null,"return_origin":null,"segments":[{{"sequence":1,"origin":null,"destination":null,"departure_time":null,"arrival_time":null,"movement_type":"outbound | return | backload | parking | unknown","source_pages":[],"source_filename":""}}],"check_in_time_actual":null,"docking_time":null,"check_out_time_actual":null,"review_flags":[],"confidence":"high | medium | low","source_filename":"","source_pages":[]}}],
- "toll_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}}],
- "parking_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}}],
- "unresolved_items":[],
- "overall_review_required":true
-}}
-
-SOURCE DOCUMENTS:
-{document_text}
-"""
-
-
-def analyze_documents(documents: list[dict]) -> dict[str, Any]:
-    client = get_ai_client()
-    response = client.models.generate_content(
+def generate_json(prompt: str) -> dict:
+    response = get_ai_client().models.generate_content(
         model=GEMINI_MODEL,
-        contents=build_analysis_prompt(documents),
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1
+        )
     )
     if not response.text:
-        raise RuntimeError("AI returned an empty analysis response.")
+        raise RuntimeError("AI returned an empty response.")
     try:
-        result = json.loads(response.text)
+        return json.loads(response.text)
     except json.JSONDecodeError as error:
         raise RuntimeError("AI response was not valid JSON.") from error
-    result["analysis_model"] = GEMINI_MODEL
-    result["approval_status"] = "pending_review"
-    return result
+
+
+def identify_document_owners(documents: list[dict]) -> dict:
+    # Only send a short evidence sample per file in this first pass. The full
+    # extracted pages are sent later only to the matching driver's analysis.
+    summaries = []
+    for document in documents:
+        pages = document.get("pages", [])
+        snippets = [
+            {"page": page.get("page_number"), "text": (page.get("text") or "")[:900]}
+            for page in pages[:3]
+        ]
+        summaries.append({
+            "filename": document["filename"],
+            "page_count": document.get("total_pages"),
+            "sample_pages": snippets
+        })
+
+    prompt = """
+Identify the document type and driver named in each PDF. Use only visible evidence.
+Do not infer that two similar names are the same person. If no clear driver name,
+return null. Keep exact original filenames. Return JSON only:
+{"documents":[{"filename":"exact filename","driver_name":null,
+"document_type":"trip_ticket | toll_reimbursement | parking_reimbursement | unknown",
+"confidence":"high | medium | low","evidence_pages":[1],"review_flags":[]}]}
+Documents:
+""" + json.dumps(summaries, ensure_ascii=False, separators=(",", ":"))
+    result = generate_json(prompt)
+    by_filename = {}
+    for item in result.get("documents", []):
+        filename = item.get("filename")
+        if filename:
+            by_filename[filename] = item
+    return by_filename
+
+
+def build_driver_prompt(driver_name: str, documents: list[dict]) -> str:
+    payload = []
+    for document in documents:
+        payload.append({
+            "filename": document["filename"],
+            "document_type": document.get("document_type", "unknown"),
+            "driver_identification": document.get("driver_identification", {}),
+            "pages": [
+                {"page_number": page.get("page_number"), "text": page.get("text", "")}
+                for page in document.get("pages", [])
+            ]
+        })
+
+    return """
+You are the trip-ticket and reimbursement analysis engine for 6WS Trip Encoder.
+Analyze documents belonging to ONE driver only: """ + json.dumps(driver_name) + """.
+Return valid JSON only. Never invent missing facts. Preserve source filename and
+PDF page numbers for every fact. If a document appears to name another driver,
+flag it and do not silently merge its records.
+
+Trip reconstruction rules:
+- Reconstruct movements chronologically using evidence, not PDF/page order alone.
+- Intermediate hubs belong in DROP OFFS; the farthest/last outbound hub before
+  the return is DESTINATION.
+- Return movements are separate rows.
+- A non-SOC to non-SOC movement is a possible backload only when its destination
+  hub contains standalone token MFM, case-insensitive.
+- SOC to MFM is outbound, not a backload.
+- Do not combine separate trips merely because they share a date or driver.
+- Keep toll and parking reimbursement records separate from trip rows.
+- Flag conflicting dates, driver identities, missing route legs, unreadable pages,
+  uncertain amounts, and ambiguous trip sequence.
+
+Return JSON with this schema:
+{
+ "driver":{"name":""" + json.dumps(driver_name) + ""","confidence":"high | medium | low","evidence":[]},
+ "documents":[{"filename":"","document_type":"trip_ticket | toll_reimbursement | parking_reimbursement | unknown","pages_used":[],"notes":[]}],
+ "trips":[{"driver_name":""" + json.dumps(driver_name) + ""","trip_ticket_number":null,"line_haul_trip_number":null,"trip_date":null,"origin":null,"drop_offs":[],"destination":null,"return_origin":null,"segments":[{"sequence":1,"origin":null,"destination":null,"departure_time":null,"arrival_time":null,"movement_type":"outbound | return | backload | unknown","source_pages":[],"source_filename":""}],"check_in_time_actual":null,"docking_time":null,"check_out_time_actual":null,"review_flags":[],"confidence":"high | medium | low","source_filename":"","source_pages":[]}],
+ "toll_reimbursements":[{"driver_name":""" + json.dumps(driver_name) + ""","date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}],
+ "parking_reimbursements":[{"driver_name":""" + json.dumps(driver_name) + ""","date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_filename":"","review_flags":[]}],
+ "unresolved_items":[],
+ "overall_review_required":true
+}
+Source documents:
+""" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def analyze_driver(driver_name: str, documents: list[dict]) -> dict[str, Any]:
+    return generate_json(build_driver_prompt(driver_name, documents))
 
 
 def _extract_one(pdf_path: Path, original_name: str) -> dict:
@@ -101,13 +138,9 @@ def _extract_one(pdf_path: Path, original_name: str) -> dict:
          "source": page.get("source"), "status": page.get("status")}
         for page in extraction["pages"]
     ]
-    document_text = "\n".join(
-        f"PAGE {page['page_number']}:\n{page['text']}" for page in pages
-    )
     return {
         "filename": original_name,
         "stored_filename": pdf_path.name,
-        "document_type": classify_document(original_name, document_text),
         "total_pages": extraction["total_pages"],
         "extraction_status": extraction["status"],
         "pages": pages
@@ -132,31 +165,95 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
         raise ValueError("No PDF documents found in this batch.")
 
     loop = asyncio.get_running_loop()
-    extracted_documents = []
     extraction_errors = []
-    # A bounded pool processes independent PDFs concurrently. Keep the cap low
-    # for small Render instances; each PDF can itself use bounded OCR workers.
     with ThreadPoolExecutor(max_workers=min(EXTRACTION_WORKERS, len(pdf_records))) as pool:
-        tasks = [
-            loop.run_in_executor(pool, _extract_one, path, original_name)
-            for path, original_name in pdf_records
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [loop.run_in_executor(pool, _extract_one, path, name) for path, name in pdf_records]
+        extraction_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for (path, original_name), result in zip(pdf_records, results):
+    extracted_documents = []
+    for (path, name), result in zip(pdf_records, extraction_results):
         if isinstance(result, Exception):
-            logger.error("Failed to extract %s: %s", original_name, result)
-            extraction_errors.append({"filename": original_name, "error": str(result)})
+            logger.error("PDF extraction failed for %s: %s", name, result)
+            extraction_errors.append({"filename": name, "error": str(result)})
         else:
             extracted_documents.append(result)
 
     if not extracted_documents:
         raise RuntimeError("All PDF extractions failed.")
 
-    analysis = await asyncio.to_thread(analyze_documents, extracted_documents)
-    analysis["batch_id"] = batch_dir.name
-    analysis["documents_processed"] = len(extracted_documents)
-    analysis["documents_received"] = len(pdf_records)
-    analysis["extraction_errors"] = extraction_errors
-    analysis["approval_status"] = "pending_review"
-    return analysis
+    # First AI pass identifies each document's driver and type from short samples.
+    # This prevents a single 100-PDF prompt and avoids mixing drivers.
+    identification = await asyncio.to_thread(identify_document_owners, extracted_documents)
+    grouped = {}
+    unidentified = []
+    for document in extracted_documents:
+        identity = identification.get(document["filename"], {})
+        document["driver_identification"] = identity
+        document["document_type"] = identity.get("document_type", "unknown")
+        driver_name = identity.get("driver_name")
+        if not driver_name or identity.get("confidence") == "low":
+            unidentified.append({
+                "filename": document["filename"],
+                "reason": "Driver identity missing or low confidence.",
+                "identification": identity
+            })
+            continue
+        grouped.setdefault(driver_name.strip(), []).append(document)
+
+    semaphore = asyncio.Semaphore(DRIVER_ANALYSIS_WORKERS)
+    async def run_driver(driver_name, driver_docs):
+        async with semaphore:
+            try:
+                analysis = await asyncio.to_thread(analyze_driver, driver_name, driver_docs)
+                analysis["driver"] = analysis.get("driver") or {"name": driver_name}
+                analysis["driver"]["name"] = driver_name
+                analysis["document_count"] = len(driver_docs)
+                analysis["source_documents"] = [doc["filename"] for doc in driver_docs]
+                return analysis
+            except Exception as error:
+                logger.exception("Driver analysis failed for %s", driver_name)
+                return {
+                    "driver": {"name": driver_name},
+                    "document_count": len(driver_docs),
+                    "source_documents": [doc["filename"] for doc in driver_docs],
+                    "trips": [],
+                    "toll_reimbursements": [],
+                    "parking_reimbursements": [],
+                    "unresolved_items": [f"Driver analysis failed: {error}"],
+                    "overall_review_required": True,
+                    "analysis_error": str(error)
+                }
+
+    driver_names = sorted(grouped)
+    driver_results = await asyncio.gather(*[
+        run_driver(name, grouped[name]) for name in driver_names
+    ])
+
+    # Keep a combined top-level view for the current dashboard/export interface,
+    # while retaining each independently analyzed driver package as the source of truth.
+    combined = {
+        "batch_id": batch_dir.name,
+        "driver": {"name": driver_names[0] if len(driver_names) == 1 else ("MULTIPLE DRIVERS" if driver_names else None)},
+        "driver_groups": driver_results,
+        "driver_count": len(driver_results),
+        "documents": [
+            {"filename": doc["filename"], "document_type": doc.get("document_type"),
+             "pages_used": [page["page_number"] for page in doc.get("pages", [])],
+             "extraction_status": doc.get("extraction_status")}
+            for doc in extracted_documents
+        ],
+        "trips": [trip for group in driver_results for trip in group.get("trips", [])],
+        "toll_reimbursements": [item for group in driver_results for item in group.get("toll_reimbursements", [])],
+        "parking_reimbursements": [item for group in driver_results for item in group.get("parking_reimbursements", [])],
+        "unresolved_items": [item for group in driver_results for item in group.get("unresolved_items", [])],
+        "unidentified_documents": unidentified,
+        "extraction_errors": extraction_errors,
+        "documents_processed": len(extracted_documents),
+        "documents_received": len(pdf_records),
+        "analysis_model": GEMINI_MODEL,
+        "approval_status": "pending_review",
+        "overall_review_required": bool(unidentified or extraction_errors or any(
+            group.get("overall_review_required", True) for group in driver_results
+        ))
+    }
+    return combined
