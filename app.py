@@ -488,6 +488,46 @@ async def assign_document_driver(batch_id: str, request: Request):
             "approval_status": "pending_review", "message": f"{filename} assigned to {clean_name}. Review the regrouped records."}
 
 
+def sync_review_edits_to_analysis(result: dict, sections: dict):
+    # The top-level rows are flattened from driver groups in the same order.
+    # Keep both representations aligned so a later manual driver reassignment
+    # cannot rebuild the batch from stale, pre-edit AI output.
+    drivers = result.get("drivers", []) or []
+    document_analyses = result.get("document_analyses", []) or []
+    for section, fields in sections.items():
+        rows = result.get(section, []) or []
+        nested_rows = [
+            row for driver in drivers for row in (driver.get(section, []) or [])
+        ]
+        for index, row in enumerate(rows):
+            if index < len(nested_rows):
+                for field in fields:
+                    if field in row:
+                        nested_rows[index][field] = row[field]
+
+        per_file_position = {}
+        for row in rows:
+            filename = row.get("source_filename")
+            if not filename:
+                continue
+            position = per_file_position.get(filename, 0)
+            source_analysis = next(
+                (item for item in document_analyses
+                 if item.get("source_filename") == filename),
+                None
+            )
+            if source_analysis is None:
+                continue
+            source_rows = source_analysis.get(section, []) or []
+            if position >= len(source_rows):
+                continue
+            source_row = source_rows[position]
+            for field in fields:
+                if field in row:
+                    source_row[field] = row[field]
+            per_file_position[filename] = position + 1
+
+
 @app.put("/api/review/{batch_id}")
 async def save_review(batch_id: str, request: Request):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
@@ -548,6 +588,7 @@ async def save_review(batch_id: str, request: Request):
                         raise HTTPException(status_code=400, detail=f"Invalid value for {field}.")
                     current[section][index][field] = value
 
+    sync_review_edits_to_analysis(current, allowed_fields)
     current["approval_status"] = "pending_review"
     current["overall_review_required"] = True
     current["review_saved_at"] = utc_now()
