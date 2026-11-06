@@ -5,7 +5,7 @@ from unittest.mock import patch
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app import DashboardAuthMiddleware, normalize_manual_driver_name, sync_review_edits_to_analysis
+from app import DashboardAuthMiddleware, normalize_manual_driver_name, sync_review_edits_to_analysis, unique_pdf_filename
 
 
 class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +40,21 @@ class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
             self.make_request(path, authorization), call_next
         )
         return response, called["next"]
+
+    def test_duplicate_sanitized_pdf_names_never_overwrite(self):
+        seen = set()
+        names = [
+            unique_pdf_filename("trip.pdf", 1, seen),
+            unique_pdf_filename("trip.pdf", 2, seen),
+            unique_pdf_filename("trip_2.pdf", 3, seen),
+            unique_pdf_filename("../trip.pdf", 4, seen),
+        ]
+        self.assertEqual(names, ["trip.pdf", "trip_2.pdf", "trip_2_2.pdf", "trip_3.pdf"])
+        self.assertEqual(len({name.lower() for name in names}), len(names))
+
+    def test_upload_filename_is_bounded_for_preview_route(self):
+        filename = unique_pdf_filename(("A" * 250) + ".pdf", 1, set())
+        self.assertLessEqual(len(filename), 124)
 
     def test_review_edits_sync_to_driver_and_source_analysis(self):
         result = {
