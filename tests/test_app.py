@@ -5,7 +5,7 @@ from unittest.mock import patch
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app import DashboardAuthMiddleware, normalize_manual_driver_name
+from app import DashboardAuthMiddleware, normalize_manual_driver_name, sync_review_edits_to_analysis
 
 
 class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +40,41 @@ class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
             self.make_request(path, authorization), call_next
         )
         return response, called["next"]
+
+    def test_review_edits_sync_to_driver_and_source_analysis(self):
+        result = {
+            "trips": [{
+                "source_filename": "ticket.pdf",
+                "trip_date": "2026-11-01",
+                "origin": "SOC 6",
+                "segments": [{"origin": "SOC 6", "destination": "Old Hub"}]
+            }],
+            "drivers": [{"trips": [{
+                "source_filename": "ticket.pdf",
+                "trip_date": "2026-11-01",
+                "origin": "SOC 6",
+                "segments": [{"origin": "SOC 6", "destination": "Old Hub"}]
+            }]}],
+            "document_analyses": [{
+                "source_filename": "ticket.pdf",
+                "trips": [{
+                    "trip_date": "2026-11-01",
+                    "origin": "SOC 6",
+                    "segments": [{"origin": "SOC 6", "destination": "Old Hub"}]
+                }]
+            }]
+        }
+        result["trips"][0]["destination"] = "Corrected Hub"
+        result["trips"][0]["segments"][0]["destination"] = "Corrected Hub"
+        sync_review_edits_to_analysis(result, {
+            "trips": {"destination", "segments"}
+        })
+        self.assertEqual(result["drivers"][0]["trips"][0]["destination"], "Corrected Hub")
+        self.assertEqual(result["document_analyses"][0]["trips"][0]["destination"], "Corrected Hub")
+        self.assertEqual(
+            result["document_analyses"][0]["trips"][0]["segments"][0]["destination"],
+            "Corrected Hub"
+        )
 
     def test_manual_driver_name_whitespace_is_normalized(self):
         self.assertEqual(normalize_manual_driver_name("  Amado   B   Canar  "), "Amado B Canar")
