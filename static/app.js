@@ -105,7 +105,8 @@ async function uploadDocuments() {
             uploadButton.textContent = `Uploading ${Math.min(offset + chunk.length, files.length)} / ${files.length}...`;
             const result = await apiRequest("/api/upload", {method: "POST", body: data});
             uploaded += result.uploaded_count || 0;
-            const completed = new Set(chunk);
+            const rejectedNames = new Set((result.rejected_files || []).map(item => item.filename));
+            const completed = new Set(chunk.filter(file => !rejectedNames.has(file.name)));
             selectedPDFs = selectedPDFs.filter(file => !completed.has(file));
             renderSelectedFiles();
             showMessage(uploadMessage, `Uploaded ${uploaded} of ${files.length} PDFs. Batch: ${batchId}`, "success");
@@ -113,10 +114,13 @@ async function uploadDocuments() {
                 showMessage(uploadMessage, result.rejected_files.map(item => `${item.filename}: ${item.reason}`).join(" · "), "error");
             }
         }
-        selectedPDFs = [];
-        activeUploadBatchId = null;
+        if (selectedPDFs.length === 0) {
+            activeUploadBatchId = null;
+            showMessage(uploadMessage, `${uploaded} PDF(s) uploaded. Batch: ${batchId}`, "success");
+        } else {
+            showMessage(uploadMessage, `Some files were rejected. Review the errors and retry the remaining files in batch ${batchId}.`, "error");
+        }
         renderSelectedFiles();
-        showMessage(uploadMessage, `${uploaded} PDF(s) uploaded. Batch: ${batchId}`, "success");
         await loadBatches();
     } catch (error) {
         // Keep all files selected for a safe retry; server-side duplicate filenames
