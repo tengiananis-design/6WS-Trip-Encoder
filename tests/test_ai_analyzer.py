@@ -1,10 +1,23 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from services.ai_analyzer import (
     _page_windows,
     _merge_chunk_records,
     merge_page_window_analyses,
+    analyze_documents_with_retry,
 )
+
+
+class RetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_ai_error_is_retried(self):
+        with patch("services.ai_analyzer.analyze_documents",
+                   side_effect=[RuntimeError("temporary"), {"driver": {"name": "Driver"}}]) as analyze, \
+             patch("services.ai_analyzer.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await analyze_documents_with_retry([{"filename": "ticket.pdf"}])
+        self.assertEqual(result["driver"]["name"], "Driver")
+        self.assertEqual(analyze.call_count, 2)
+        sleep.assert_awaited_once_with(2)
 
 
 class PageWindowTests(unittest.TestCase):
