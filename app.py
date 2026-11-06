@@ -220,6 +220,22 @@ async def get_analysis_job(batch_id: str):
     batch_dir = UPLOAD_DIR / batch_id
     if not batch_dir.is_dir():
         raise HTTPException(status_code=404, detail="Batch not found.")
+    from services import storage
+    if storage.shared_storage_enabled() and storage.exists(f"jobs/{batch_id}.json"):
+        job = storage.load_json(f"jobs/{batch_id}.json")
+        if job.get("task_id"):
+            from services.celery_app import celery_app
+            task = celery_app.AsyncResult(job["task_id"])
+            meta = task.info if isinstance(task.info, dict) else {}
+            job.update(meta)
+            if task.successful():
+                job.update({"status": "completed", **(task.result or {})})
+            elif task.failed():
+                job.update({"status": "failed", "error": str(task.result)})
+            else:
+                job["status"] = "processing" if task.state in ("STARTED", "PROGRESS", "RETRY") else "queued"
+                job["celery_state"] = task.state
+        return job
     job = read_job(batch_dir)
     if not job:
         return {"batch_id": batch_id, "status": "not_started"}
@@ -228,11 +244,14 @@ async def get_analysis_job(batch_id: str):
 
 @app.get("/api/results/{batch_id}")
 async def get_analysis_result(batch_id: str):
+    from services import storage
     batch_id = safe_batch_id(batch_id)
     result_file = RESULT_DIR / f"{batch_id}.json"
-    if not result_file.is_file():
-        raise HTTPException(status_code=404, detail="Analysis result not found.")
     try:
+        if storage.shared_storage_enabled() and storage.exists(f"results/{batch_id}.json"):
+            return storage.load_json(f"results/{batch_id}.json")
+        if not result_file.is_file():
+            raise HTTPException(status_code=404, detail="Analysis result not found.")
         return json.loads(result_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Stored analysis result is invalid JSON.")
