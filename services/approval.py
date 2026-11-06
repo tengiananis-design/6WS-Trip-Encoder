@@ -16,6 +16,12 @@ def approval_issues(result: dict) -> list[str]:
             issues.append(f"{len(values)} {label} remain.")
 
     groups = result.get("driver_groups") or []
+    if not groups:
+        for collection in ("trips", "toll_reimbursements", "parking_reimbursements"):
+            for record in result.get(collection, []):
+                if record.get("review_flags") or record.get("confidence") == "low":
+                    issues.append("Batch records still contain review flags.")
+                    break
     for group in groups:
         driver = (group.get("driver") or {}).get("name") or "Unknown driver"
         if group.get("overall_review_required", True):
