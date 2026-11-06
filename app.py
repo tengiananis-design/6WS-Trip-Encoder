@@ -83,6 +83,19 @@ def normalize_manual_driver_name(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip())
 
 
+def unique_pdf_filename(original: str, index: int, seen_names: set[str]) -> str:
+    original_name = Path(original or "").name
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
+    stem = (stem or f"document_{index}")[:120].strip("._") or f"document_{index}"
+    candidate = f"{stem}.pdf"
+    suffix = 2
+    while candidate.lower() in seen_names:
+        candidate = f"{stem}_{suffix}.pdf"
+        suffix += 1
+    seen_names.add(candidate.lower())
+    return candidate
+
+
 def atomic_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -266,11 +279,7 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                 await uploaded.close()
                 continue
 
-            stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original).stem).strip("._") or f"document_{index}"
-            filename = f"{stem}.pdf"
-            if filename.lower() in seen_names:
-                filename = f"{stem}_{index}.pdf"
-            seen_names.add(filename.lower())
+            filename = unique_pdf_filename(original, index, seen_names)
             destination = batch_dir / filename
             total, signature = 0, b""
 
