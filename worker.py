@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from services.celery_app import celery_app
 
 if __name__ == "__main__":
