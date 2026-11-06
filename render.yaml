@@ -1,0 +1,16 @@
+
+services:
+  - type: web
+    name: 6ws-trip-encoder
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_SHEETS_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
