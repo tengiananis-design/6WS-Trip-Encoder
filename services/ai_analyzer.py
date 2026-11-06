@@ -119,12 +119,24 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             extraction = extract_complete_pdf(pdf_path)
             pages = _limit_page_text(extraction.get("pages", []))
             text = "\n".join(str(page.get("text") or "") for page in pages)
+            failed_pages = [
+                page.get("page_number")
+                for page in pages
+                if page.get("status") == "failed" or not str(page.get("text") or "").strip()
+            ]
+            if failed_pages:
+                extraction_errors.append({
+                    "filename": pdf_path.name,
+                    "pages": failed_pages,
+                    "error": "One or more pages could not be read reliably; manual review is required."
+                })
             document = {
                 "filename": pdf_path.name,
                 "document_type": classify_document(pdf_path.name, text),
                 "driver_name": None,
                 "total_pages": extraction.get("total_pages", len(pages)),
                 "extraction_status": extraction.get("status", "unknown"),
+                "extraction_warnings": failed_pages,
                 "pages": pages
             }
             extracted_documents.append(document)
