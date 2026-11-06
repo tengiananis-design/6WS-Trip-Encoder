@@ -79,6 +79,8 @@ http://127.0.0.1:8000
 ## Required Environment Variables
 
 - `GEMINI_API_KEY`
+- `GEMINI_REQUEST_INTERVAL_SECONDS` — minimum time between AI requests; defaults to 4 seconds to reduce rate-limit errors on large batches.
+- `GEMINI_MAX_RETRIES` — transient API retry attempts; defaults to 3.
 - `GOOGLE_SHEETS_ID`
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 
@@ -102,7 +104,7 @@ The analysis endpoint now queues work through FastAPI background tasks:
 
 ### Important operational limitation
 
-This first background-job implementation is process-local, not a durable distributed queue. A restart, redeploy, or instance sleep can interrupt an active batch. Job status and uploaded PDFs are stored under `DATA_DIR`, which defaults to the application's local `data` directory. Local container storage is not durable across Render redeploys or instance replacement.
+The default fallback uses FastAPI background tasks and is process-local, not a durable distributed queue. A restart, redeploy, or instance sleep can interrupt an active batch. For durable multi-PDF processing, enable the optional Celery + Redis + S3-compatible path described below. Job status and uploaded PDFs in local fallback mode are stored under `DATA_DIR`, which defaults to the application's local `data` directory. Local container storage is not durable across Render redeploys or instance replacement.
 
 Before using this with real 100+ PDF batches, configure durable storage and move processing to a dedicated worker/queue with persistent job state. If using a mounted persistent disk, set `DATA_DIR` to its mount path. Do not assume the current free web-service filesystem is persistent.
 
@@ -117,7 +119,7 @@ The GitHub Actions unit-test workflow is configured for the development branch. 
 
 ## Distributed worker architecture (development branch)
 
-The branch now includes an optional Celery + Redis processing path and S3-compatible shared storage:
+The branch now includes an optional Celery + Redis processing path and S3-compatible shared storage. It also serializes per-batch analysis and approval requests, blocks duplicate exports, reports partial Google Sheets writes for manual reconciliation, and retries transient Gemini API errors:
 
 - `services/celery_app.py` configures the Redis broker/backend.
 - `services/tasks.py` downloads a batch into isolated temporary worker storage, runs the existing PDF/AI pipeline, and saves the result to shared object storage.
