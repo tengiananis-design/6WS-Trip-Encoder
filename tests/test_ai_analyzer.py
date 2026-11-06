@@ -7,6 +7,52 @@ from services.ai_analyzer import analyze_batch_documents
 
 
 class DriverScopedAnalysisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_assignment_groups_receipt_without_printed_driver_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            batch = Path(temporary)
+            (batch / "0001_trip.pdf").write_bytes(b"%PDF-1.4")
+            (batch / "0002_toll.pdf").write_bytes(b"%PDF-1.4")
+
+            def fake_extract(path):
+                text = "Trip Ticket" if "trip" in path.name else "Toll Reimbursement"
+                return {
+                    "pages": [{"page_number": 1, "text": text, "status": "success"}],
+                    "total_pages": 1,
+                    "status": "success",
+                }
+
+            def fake_analyze(documents):
+                if len(documents) == 1 and "toll" in documents[0]["filename"]:
+                    return {
+                        "driver": {"name": None, "confidence": "unknown", "evidence": []},
+                        "trips": [], "toll_reimbursements": [], "parking_reimbursements": [],
+                        "unresolved_items": [],
+                    }
+                return {
+                    "driver": {"name": "JUAN DELA CRUZ", "confidence": "high", "evidence": []},
+                    "trips": [],
+                    "toll_reimbursements": [{
+                        "date": "2026-11-01", "location": "NLEX", "amount": "120",
+                        "source_references": [{"filename": "0002_toll.pdf", "page_number": 1}],
+                    }],
+                    "parking_reimbursements": [],
+                    "unresolved_items": [],
+                }
+
+            with patch("services.ai_analyzer.extract_complete_pdf", side_effect=fake_extract), patch(
+                "services.ai_analyzer.analyze_documents", side_effect=fake_analyze
+            ):
+                result = await analyze_batch_documents(
+                    batch,
+                    manual_assignments={"0002_toll.pdf": "Juan Dela Cruz"},
+                )
+
+            self.assertEqual(len(result["driver_groups"]), 1)
+            self.assertEqual(result["driver_groups"][0]["driver"]["name"], "JUAN DELA CRUZ")
+            toll_document = next(d for d in result["documents"] if d["filename"] == "0002_toll.pdf")
+            self.assertEqual(toll_document["driver_assignment_source"], "manual")
+            self.assertEqual(result["toll_reimbursements"][0]["driver_name"], "JUAN DELA CRUZ")
+
     async def test_related_pdfs_are_reanalyzed_together_within_driver_group(self):
         with tempfile.TemporaryDirectory() as temporary:
             batch = Path(temporary)
