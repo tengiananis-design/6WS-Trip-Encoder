@@ -14,15 +14,20 @@ def approval_lock(batch_id: str):
     local_lock = None
 
     if redis_url:
-        import redis
-        client = redis.Redis.from_url(redis_url)
-        lock = client.lock(
-            f"6ws:approval:{batch_id}",
-            timeout=60 * 60,
-            blocking=False,
-        )
-        if not lock.acquire(blocking=False):
-            raise RuntimeError("This batch is already being approved or exported.")
+        try:
+            import redis
+            client = redis.Redis.from_url(redis_url, socket_connect_timeout=5, socket_timeout=5)
+            lock = client.lock(
+                f"6ws:approval:{batch_id}",
+                timeout=60 * 60,
+                blocking=False,
+            )
+            if not lock.acquire(blocking=False):
+                raise RuntimeError("This batch is already being approved or exported.")
+        except RuntimeError:
+            raise
+        except Exception as error:
+            raise RuntimeError("Distributed approval locking is unavailable; export was not started.") from error
     else:
         with _LOCAL_LOCKS_GUARD:
             local_lock = _LOCAL_LOCKS.setdefault(batch_id, threading.Lock())
