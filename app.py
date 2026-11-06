@@ -46,13 +46,22 @@ async def health():
 @app.get("/api/status")
 async def application_status():
     import os
+    spreadsheet_id = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEETS_ID")
+    service_account_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    service_account_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials/service-account.json")
+    google_credentials_available = bool(service_account_json) or os.path.isfile(service_account_file)
+    shared_storage_available = bool(
+        os.getenv("S3_BUCKET")
+        and os.getenv("S3_ACCESS_KEY_ID")
+        and os.getenv("S3_SECRET_ACCESS_KEY")
+    )
     return {
-        "status": "ready",
+        "status": "online",
         "pdf_processing": "available",
         "ai_analysis": "configured" if os.getenv("GEMINI_API_KEY") else "missing_api_key",
-        "google_sheets": "configured" if (os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEETS_ID")) else "missing_spreadsheet_id",
-        "storage": "shared_object_storage" if (os.getenv("S3_BUCKET") and os.getenv("S3_ACCESS_KEY_ID") and os.getenv("S3_SECRET_ACCESS_KEY")) else "local_filesystem",
-        "distributed_queue": "configured" if (os.getenv("REDIS_URL") and os.getenv("S3_BUCKET")) else "local_fallback"
+        "google_sheets": "configured" if (spreadsheet_id and google_credentials_available) else "missing_spreadsheet_or_credentials",
+        "storage": "shared_object_storage" if shared_storage_available else "local_filesystem",
+        "distributed_queue": "configured" if (os.getenv("REDIS_URL") and shared_storage_available) else "local_fallback"
     }
 
 
