@@ -118,7 +118,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
                 progress_callback(file_index - 1, total_files, pdf_path.name)
             extraction = extract_complete_pdf(pdf_path)
             pages = _limit_page_text(extraction.get("pages", []))
-            text = "\\n".join(str(page.get("text") or "") for page in pages)
+            text = "\n".join(str(page.get("text") or "") for page in pages)
             document = {
                 "filename": pdf_path.name,
                 "document_type": classify_document(pdf_path.name, text),
