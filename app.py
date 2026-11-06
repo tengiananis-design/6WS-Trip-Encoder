@@ -202,11 +202,12 @@ async def approve_batch(batch_id: str, request: Request):
     result = json.loads(result_file.read_text(encoding="utf-8"))
     if result.get("overall_review_required") is not False:
         raise HTTPException(status_code=409, detail="This batch still has unresolved review flags.")
-    if result.get("approval_status") == "exported":
-        raise HTTPException(status_code=409, detail="This batch has already been exported.")
+    if result.get("approval_status") in ("exported", "exporting", "export_failed_manual_reconciliation"):
+        raise HTTPException(status_code=409, detail="This batch is already exporting, exported, or needs manual reconciliation. Automatic retry is blocked to avoid duplicate spreadsheet rows.")
 
-    result["approval_status"] = "approved"
+    result["approval_status"] = "exporting"
     result["approved_at"] = datetime.now(timezone.utc).isoformat()
+    result["export_started_at"] = datetime.now(timezone.utc).isoformat()
     result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     try:
@@ -218,6 +219,7 @@ async def approve_batch(batch_id: str, request: Request):
         return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
     except Exception as error:
         logger.exception("Export failed for approved batch %s", batch_id)
+        result["approval_status"] = "export_failed_manual_reconciliation"
         result["export_error"] = str(error)
         result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         raise HTTPException(status_code=502, detail=f"Approval saved, but export failed: {error}")
