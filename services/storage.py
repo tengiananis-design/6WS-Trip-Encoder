@@ -10,7 +10,7 @@ from urllib.parse import quote
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).resolve().parents[1] / "data")) )
 BUCKET = os.getenv("S3_BUCKET")
 _PREFIX = os.getenv("S3_PREFIX", "6ws").strip("/")
 _client = None
