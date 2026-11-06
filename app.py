@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -203,23 +203,79 @@ async def list_batches():
     return {"batches": batches}
 
 
-@app.post("/api/analyze/{batch_id}")
-async def analyze_batch(batch_id: str):
+def analysis_status_path(batch_id: str) -> Path:
+    return RESULT_DIR / f"{batch_id}.status.json"
+
+
+def write_analysis_status(batch_id: str, status: dict) -> None:
+    status_file = analysis_status_path(batch_id)
+    temporary = RESULT_DIR / f"{batch_id}.status.json.tmp"
+    temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(status_file)
+
+
+async def run_analysis_task(batch_id: str) -> None:
     batch_dir = safe_batch_dir(batch_id)
-    read_batch(batch_dir)
     try:
         from services.ai_analyzer import analyze_batch_documents
+        write_analysis_status(batch_id, {
+            "batch_id": batch_id, "status": "processing",
+            "message": "Extracting PDFs and analyzing driver packages."
+        })
         result = await analyze_batch_documents(batch_dir)
         result_file = RESULT_DIR / f"{batch_id}.json"
         temporary = RESULT_DIR / f"{batch_id}.json.tmp"
         temporary.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         temporary.replace(result_file)
-        return {"message": "Analysis completed.", "batch_id": batch_id, "result": result}
-    except ImportError:
-        raise HTTPException(status_code=501, detail="AI analyzer service is not installed.")
+        write_analysis_status(batch_id, {
+            "batch_id": batch_id, "status": "completed",
+            "message": "Analysis completed.",
+            "documents_processed": result.get("documents_processed", 0),
+            "driver_count": result.get("driver_count", 0)
+        })
     except Exception as error:
         logger.exception("Analysis failed for batch %s", batch_id)
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(error)}")
+        write_analysis_status(batch_id, {
+            "batch_id": batch_id, "status": "failed",
+            "message": str(error)
+        })
+
+
+@app.post("/api/analyze/{batch_id}", status_code=202)
+async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
+    batch_dir = safe_batch_dir(batch_id)
+    read_batch(batch_dir)
+    status_file = analysis_status_path(batch_id)
+    if status_file.exists():
+        current = json.loads(status_file.read_text(encoding="utf-8"))
+        if current.get("status") == "processing":
+            return current
+    write_analysis_status(batch_id, {
+        "batch_id": batch_id, "status": "queued",
+        "message": "Analysis queued."
+    })
+    background_tasks.add_task(run_analysis_task, batch_id)
+    return {
+        "batch_id": batch_id, "status": "queued",
+        "message": "Analysis queued. You can safely keep this page open while processing continues."
+    }
+
+
+@app.get("/api/analyze/{batch_id}/status")
+async def get_analysis_status(batch_id: str):
+    safe_batch_dir(batch_id)
+    status_file = analysis_status_path(batch_id)
+    if not status_file.exists():
+        result_file = RESULT_DIR / f"{batch_id}.json"
+        if result_file.exists():
+            result = json.loads(result_file.read_text(encoding="utf-8"))
+            return {
+                "batch_id": batch_id, "status": "completed",
+                "documents_processed": result.get("documents_processed", 0),
+                "driver_count": result.get("driver_count", 0)
+            }
+        raise HTTPException(status_code=404, detail="No analysis job has been started for this batch.")
+    return json.loads(status_file.read_text(encoding="utf-8"))
 
 
 @app.get("/api/results/{batch_id}")
