@@ -106,63 +106,105 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
 
     extracted_documents = []
     extraction_errors = []
+    per_document_analyses = []
+
+    # Analyze each PDF independently first. This prevents documents belonging
+    # to different drivers from being merged just because they were uploaded
+    # in the same batch. Requests are deliberately sequential to limit API bursts.
     for pdf_path in pdf_files:
         try:
             extraction = extract_complete_pdf(pdf_path)
             pages = _limit_page_text(extraction.get("pages", []))
-            text = "\n".join(str(page.get("text") or "") for page in pages)
-            extracted_documents.append({
+            text = "\\n".join(str(page.get("text") or "") for page in pages)
+            document = {
                 "filename": pdf_path.name,
                 "document_type": classify_document(pdf_path.name, text),
                 "driver_name": None,
                 "total_pages": extraction.get("total_pages", len(pages)),
                 "extraction_status": extraction.get("status", "unknown"),
                 "pages": pages
-            })
+            }
+            extracted_documents.append(document)
+            analysis = analyze_documents([document])
+            driver = analysis.get("driver") or {}
+            document["driver"] = driver
+            document["driver_name"] = driver.get("name")
+            per_document_analyses.append({"document": document, "analysis": analysis})
         except Exception as error:
-            logger.exception("Failed to extract %s", pdf_path.name)
+            logger.exception("Failed to extract/analyze %s", pdf_path.name)
             extraction_errors.append({"filename": pdf_path.name, "error": str(error)})
 
-    if not extracted_documents:
-        raise RuntimeError("All PDF extractions failed.")
+    if not per_document_analyses:
+        raise RuntimeError("No PDF documents could be analyzed successfully.")
 
-    # Keep each AI request bounded. The model sees groups of at most five PDFs.
-    analyses = []
-    for offset in range(0, len(extracted_documents), 5):
-        subset = extracted_documents[offset:offset + 5]
-        analyses.append(analyze_documents(subset))
+    from services.driver_grouping import group_documents_by_driver
+    grouping = group_documents_by_driver(extracted_documents)
+    analyses_by_filename = {item["document"]["filename"]: item["analysis"] for item in per_document_analyses}
 
-    merged = {
-        "driver": {"name": None, "confidence": "unknown", "evidence": []},
-        "documents": [], "trips": [], "toll_reimbursements": [],
-        "parking_reimbursements": [], "unresolved_items": []
-    }
-    driver_candidates = []
-    for item in analyses:
-        driver = item.get("driver") or {}
-        if driver.get("name"):
-            driver_candidates.append((str(driver["name"]).strip(), driver.get("confidence", "unknown")))
-            merged["driver"]["evidence"].extend(driver.get("evidence") or [])
-        for key in ("documents", "trips", "toll_reimbursements", "parking_reimbursements", "unresolved_items"):
-            merged[key].extend(item.get(key) or [])
+    groups = []
+    all_trips, all_tolls, all_parking = [], [], []
+    unresolved = []
+    for group in grouping["grouped_documents"]:
+        driver_name = group["driver_name"]
+        group_docs = group["documents"]
+        group_trips, group_tolls, group_parking = [], [], []
+        confidences = []
+        evidence = []
+        for document in group_docs:
+            analysis = analyses_by_filename[document["filename"]]
+            driver = analysis.get("driver") or {}
+            confidences.append(driver.get("confidence", "unknown"))
+            evidence.extend(driver.get("evidence") or [])
+            group_trips.extend(analysis.get("trips") or [])
+            group_tolls.extend(analysis.get("toll_reimbursements") or [])
+            group_parking.extend(analysis.get("parking_reimbursements") or [])
+            unresolved.extend(analysis.get("unresolved_items") or [])
 
-    unique_names = {name.casefold(): name for name, _ in driver_candidates}
-    if len(unique_names) == 1:
-        merged["driver"]["name"] = next(iter(unique_names.values()))
-        confidences = [confidence for _, confidence in driver_candidates]
-        merged["driver"]["confidence"] = "high" if confidences and all(c == "high" for c in confidences) else "medium"
-    elif len(unique_names) > 1:
-        merged["unresolved_items"].append({
-            "type": "driver_identity_conflict",
-            "drivers": list(unique_names.values()),
-            "message": "The batch contains conflicting driver identities; separate driver packages before approval."
+        confidence = "high" if confidences and all(value in ("high", "verified") for value in confidences) else "medium"
+        for trip in group_trips:
+            trip["driver_name"] = driver_name
+        for expense in group_tolls + group_parking:
+            expense["driver_name"] = driver_name
+
+        group_result = {
+            "driver": {"name": driver_name, "confidence": confidence, "evidence": evidence},
+            "documents": [{"filename": d["filename"], "document_type": d.get("document_type"), "total_pages": d.get("total_pages")} for d in group_docs],
+            "trips": group_trips,
+            "toll_reimbursements": group_tolls,
+            "parking_reimbursements": group_parking,
+            "status": "pending_review"
+        }
+        groups.append(group_result)
+        all_trips.extend(group_trips)
+        all_tolls.extend(group_tolls)
+        all_parking.extend(group_parking)
+
+    unidentified_names = {d["filename"] for d in grouping["unidentified_documents"]}
+    for filename in sorted(unidentified_names):
+        unresolved.append({
+            "type": "unidentified_driver_document",
+            "filename": filename,
+            "message": "Driver identity is missing or conflicting. Assign this PDF to a driver during review."
         })
-    else:
-        merged["unresolved_items"].append("Driver identity could not be established from the analyzed documents.")
+    unresolved.extend(grouping["review_items"])
 
-    merged["documents_processed"] = len(extracted_documents)
-    merged["extraction_errors"] = extraction_errors
-    merged["analysis_model"] = GEMINI_MODEL
-    merged["analysis_chunks"] = len(analyses)
-    merged["approval_status"] = "pending_review"
-    return merged
+    unique_driver_names = {g["driver"]["name"] for g in groups}
+    return {
+        "driver": {
+            "name": groups[0]["driver"]["name"] if len(groups) == 1 else None,
+            "confidence": groups[0]["driver"]["confidence"] if len(groups) == 1 else "unknown",
+            "evidence": [e for g in groups for e in g["driver"]["evidence"]]
+        },
+        "driver_groups": groups,
+        "documents": [{"filename": d["filename"], "document_type": d.get("document_type"), "driver_name": d.get("driver_name"), "total_pages": d.get("total_pages"), "extraction_status": d.get("extraction_status")} for d in extracted_documents],
+        "documents_processed": len(extracted_documents),
+        "trips": all_trips,
+        "toll_reimbursements": all_tolls,
+        "parking_reimbursements": all_parking,
+        "unresolved_items": unresolved,
+        "extraction_errors": extraction_errors,
+        "analysis_model": GEMINI_MODEL,
+        "analysis_requests": len(per_document_analyses),
+        "overall_review_required": bool(unresolved or extraction_errors or any(g["driver"]["confidence"] not in ("high", "verified") for g in groups)),
+        "approval_status": "pending_review"
+    }
