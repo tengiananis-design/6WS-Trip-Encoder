@@ -175,6 +175,9 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                 doc.setdefault("document_type", hint)
             analysis["documents"] = docs
             analysis["source_filename"] = pdf_path.name
+            for section in ("trips", "toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
+                for record in analysis.get(section, []):
+                    record.setdefault("source_filename", pdf_path.name)
             analysis["extraction_status"] = extraction.get("status")
             analysis["page_extraction_review_required"] = any(p.get("status") == "failed" for p in pages)
             analysis["document_type_review_required"] = any(d.get("document_type") == "unknown" for d in docs)

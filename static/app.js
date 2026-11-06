@@ -459,6 +459,19 @@ function renderAnalysis(result, batchId) {
                 });
                 html += '</div>';
             }
+            const sourcePages = row.source_pages || [];
+            if (row.source_filename && sourcePages.length) {
+                html += '<div class="source-evidence"><strong>Source evidence · ' +
+                    escapeHTML(row.source_filename) + '</strong><div class="source-page-list">';
+                sourcePages.forEach(pageNumber => {
+                    const imageUrl = '/api/source/' + encodeURIComponent(activeReviewBatchId) + '/' +
+                        encodeURIComponent(row.source_filename) + '/page/' + Number(pageNumber);
+                    html += '<figure class="source-page"><figcaption>PDF page ' + Number(pageNumber) +
+                        '</figcaption><a href="' + imageUrl + '" target="_blank" rel="noopener"><img loading="lazy" src="' +
+                        imageUrl + '" alt="Source PDF page ' + Number(pageNumber) + '"></a></figure>';
+                });
+                html += '</div></div>';
+            }
             html += '<p class="review-flags"><strong>Review flags:</strong> ' +
                 escapeHTML((row.review_flags || []).join("; ") || "None reported") + '</p></div>';
         });

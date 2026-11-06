@@ -397,3 +397,10 @@ footer {
 .movement-list { display: grid; gap: 10px; margin: 10px 0; }
 .movement-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .movement-row > strong { display: block; margin-bottom: 8px; font-size: 12px; }
+
+.source-evidence { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.source-evidence > strong { font-size: 12px; display: block; margin-bottom: 8px; }
+.source-page-list { display: grid; grid-template-columns: repeat(auto-fit,minmax(170px,1fr)); gap: 10px; }
+.source-page { margin: 0; min-width: 0; }
+.source-page figcaption { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+.source-page img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: white; }

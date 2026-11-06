@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+import base64
+import hmac
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -30,6 +33,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(APP_NAME)
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
+app.add_middleware(DashboardAuthMiddleware)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
@@ -115,6 +119,32 @@ def get_result(batch_id):
     if storage:
         return storage.get_json(f"batches/{batch_id}/result.json")
     return read_json(RESULT_DIR / f"{batch_id}.json")
+
+
+def materialize_source_file(batch_id, filename, destination):
+    manifest = get_manifest(batch_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    document = next((item for item in manifest.get("documents", [])
+                     if item.get("filename") == filename), None)
+    if not document:
+        raise HTTPException(status_code=404, detail="Source PDF not found in this batch.")
+    storage = durable_storage()
+    if storage:
+        key = document.get("storage_key")
+        if not key:
+            raise HTTPException(status_code=404, detail="Source storage reference is missing.")
+        storage.get_file(key, destination)
+    else:
+        relative = document.get("path")
+        if not relative:
+            raise HTTPException(status_code=404, detail="Source file path is missing.")
+        source = (BASE_DIR / relative).resolve()
+        allowed_root = (UPLOAD_DIR / batch_id).resolve()
+        if allowed_root not in source.parents or not source.is_file():
+            raise HTTPException(status_code=404, detail="Source PDF is unavailable.")
+        shutil.copyfile(source, destination)
+    return document
 
 
 async def run_local_analysis(batch_id):
@@ -308,6 +338,33 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
         background_tasks.add_task(run_local_analysis, batch_id)
         return {"batch_id": batch_id, "status": "queued",
                 "warning": "Local background mode is not restart-safe. Configure REDIS_URL and S3_BUCKET for durable processing."}
+
+
+@app.get("/api/source/{batch_id}/{filename}/page/{page_number}")
+async def preview_source_page(batch_id: str, filename: str, page_number: int):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,180}\\.pdf", filename, flags=re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="Invalid PDF filename.")
+    if page_number < 1 or page_number > 500:
+        raise HTTPException(status_code=400, detail="Page number must be between 1 and 500.")
+    import fitz
+    with tempfile.TemporaryDirectory(prefix="6ws-preview-") as temp_dir:
+        source_path = Path(temp_dir) / "source.pdf"
+        materialize_source_file(batch_id, filename, source_path)
+        try:
+            with fitz.open(source_path) as pdf:
+                if page_number > len(pdf):
+                    raise HTTPException(status_code=404, detail="PDF page does not exist.")
+                pix = pdf.load_page(page_number - 1).get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+                image_bytes = pix.tobytes("png")
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.exception("Unable to render source PDF page")
+            raise HTTPException(status_code=422, detail="Unable to render this PDF page.") from error
+    return Response(content=image_bytes, media_type="image/png",
+                    headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/api/results/{batch_id}")
