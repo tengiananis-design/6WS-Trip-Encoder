@@ -57,7 +57,7 @@ class HybridOCRTests(unittest.TestCase):
         page = result["pages"][0]
         self.assertEqual(page["text"], "Trip Ticket")
         self.assertEqual(page["status"], "completed")
-        self.assertIsNone(page["error"])
+        self.assertEqual(page["error"], "tesseract error")
 
 
 if __name__ == "__main__":
