@@ -327,6 +327,8 @@ async def save_reviewed_result(batch_id: str, request: Request):
             raise HTTPException(status_code=400, detail=f"{field} must be a list.")
     if not isinstance(reviewed.get("driver"), dict):
         raise HTTPException(status_code=400, detail="driver must be an object.")
+    from services.pipeline import validate_analysis_result
+    reviewed = validate_analysis_result(reviewed)
     reviewed["batch_id"] = batch_id
     reviewed["approval_status"] = "pending_review"
     reviewed["review_saved_at"] = datetime.now(timezone.utc).isoformat()
