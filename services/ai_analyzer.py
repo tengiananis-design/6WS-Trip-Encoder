@@ -413,7 +413,7 @@ def assemble_batch_result(batch_id: str, per_document_results: list[dict],
     }
 
 
-async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
+async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None) -> dict[str, Any]:
     batch_dir = Path(batch_dir)
     pdf_files = sorted(p for p in batch_dir.glob("*.pdf") if p.is_file())
     if not pdf_files:
@@ -468,6 +468,15 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
         except Exception as error:
             logger.exception("Failed to process %s", pdf_path.name)
             extraction_errors.append({"filename": pdf_path.name, "error": str(error)})
+
+        if progress_callback:
+            progress_callback({
+                "documents_processed": len(per_document_results) + len(extraction_errors),
+                "documents_successful": len(per_document_results),
+                "documents_failed": len(extraction_errors),
+                "documents_total": len(pdf_files),
+                "current_file": pdf_path.name
+            })
 
     if not per_document_results:
         raise RuntimeError("No PDF documents could be analyzed successfully.")

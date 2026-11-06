@@ -35,7 +35,13 @@ def analyze_batch_task(batch_id):
                 if not filename or not key:
                     raise ValueError("Manifest contains a missing source object reference.")
                 storage.get_file(key, batch_dir / filename)
-            result = asyncio.run(analyze_batch_documents(batch_dir))
+            def report_progress(progress):
+                storage.put_json(f"batches/{batch_id}/status.json", {
+                    "batch_id": batch_id, "status": "processing", **progress
+                })
+            result = asyncio.run(analyze_batch_documents(
+                batch_dir, progress_callback=report_progress
+            ))
         result["job_status"] = "completed"
         storage.put_json(f"batches/{batch_id}/result.json", result)
         storage.put_json(f"batches/{batch_id}/status.json",

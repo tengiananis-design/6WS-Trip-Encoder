@@ -354,7 +354,11 @@ async function pollAnalysis(batchId) {
             await loadBatches();
             return;
         }
-        analysisResults.innerHTML = `<p class="empty-state">Analysis ${escapeHTML(state.status || "pending")}... Checking again in 5 seconds.</p>`;
+        const progress = state.documents_total
+            ? " · " + Number(state.documents_processed || 0) + "/" + Number(state.documents_total) + " PDFs processed" +
+              (state.current_file ? " · " + escapeHTML(state.current_file) : "")
+            : "";
+        analysisResults.innerHTML = `<p class="empty-state">Analysis ${escapeHTML(state.status || "pending")}${progress}... Checking again in 5 seconds.</p>`;
         await wait(5000);
     }
 }

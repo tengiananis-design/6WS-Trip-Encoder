@@ -192,7 +192,11 @@ async def run_local_analysis(batch_id):
     batch_dir = UPLOAD_DIR / batch_id
     try:
         from services.ai_analyzer import analyze_batch_documents
-        result = await analyze_batch_documents(batch_dir)
+        set_batch_status(batch_id, "processing", documents_processed=0,
+                         documents_total=len(list(batch_dir.glob("*.pdf"))))
+        def report_progress(progress):
+            set_batch_status(batch_id, "processing", **progress)
+        result = await analyze_batch_documents(batch_dir, progress_callback=report_progress)
         result["job_status"] = "completed"
         result["completed_at"] = utc_now()
         atomic_json(RESULT_DIR / f"{batch_id}.json", result)
