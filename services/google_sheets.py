@@ -67,17 +67,33 @@ def prepare_reimbursement_rows(records: list[dict], driver_name: str) -> list[li
              "APPROVED"] for record in records]
 
 
+class PartialExportError(RuntimeError):
+    def __init__(self, failed_sheet: str, completed_exports: list[dict], cause: Exception):
+        self.failed_sheet = failed_sheet
+        self.completed_exports = completed_exports
+        self.cause = cause
+        super().__init__(
+            f"Export stopped at sheet '{failed_sheet}'. "
+            f"{len(completed_exports)} earlier sheet(s) may already contain rows. "
+            f"Do not retry automatically; reconcile the listed sheets first. Cause: {cause}"
+        )
+
+
 async def export_approved_batch(batch_id: str, result: dict) -> dict:
     if result.get("approval_status") not in ("approved", "exporting"):
         raise ValueError("Batch must be approved before export.")
     service = get_sheets_service()
     driver_name = result.get("driver", {}).get("name") or "MULTIPLE / SEE ROW DRIVER"
+    operations = [
+        (TRIP_SHEET_NAME, prepare_trip_rows(result)),
+        (TOLL_SHEET_NAME, prepare_reimbursement_rows(result.get("toll_reimbursements", []), driver_name)),
+        (PARKING_SHEET_NAME, prepare_reimbursement_rows(result.get("parking_reimbursements", []), driver_name)),
+    ]
     exports = []
-    try:
-        exports.append(append_rows(service, TRIP_SHEET_NAME, prepare_trip_rows(result)))
-        exports.append(append_rows(service, TOLL_SHEET_NAME, prepare_reimbursement_rows(result.get("toll_reimbursements", []), driver_name)))
-        exports.append(append_rows(service, PARKING_SHEET_NAME, prepare_reimbursement_rows(result.get("parking_reimbursements", []), driver_name)))
-    except HttpError:
-        logger.exception("Google Sheets export failed for batch %s", batch_id)
-        raise
+    for sheet_name, rows in operations:
+        try:
+            exports.append(append_rows(service, sheet_name, rows))
+        except Exception as error:
+            logger.exception("Google Sheets export failed for batch %s at sheet %s", batch_id, sheet_name)
+            raise PartialExportError(sheet_name, exports, error) from error
     return {"batch_id": batch_id, "driver": driver_name, "exports": exports, "status": "exported"}
