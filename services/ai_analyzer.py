@@ -221,10 +221,20 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                     for doc in driver_docs for page in doc.get("pages", [])
                     if page.get("status") == "failed" or not (page.get("text") or "").strip()
                 ]
+                identity_review = [
+                    doc["filename"] for doc in driver_docs
+                    if doc.get("driver_identification", {}).get("confidence") != "high"
+                    or doc.get("document_type") == "unknown"
+                ]
                 analysis["overall_review_required"] = bool(
                     analysis.get("unresolved_items") or flagged_records or failed_pages
-                    or analysis.get("overall_review_required", False)
+                    or identity_review or analysis.get("overall_review_required", False)
                 )
+                if identity_review:
+                    analysis.setdefault("unresolved_items", []).extend(
+                        f"Driver or document-type identification needs verification: {name}"
+                        for name in identity_review
+                    )
                 if failed_pages:
                     analysis.setdefault("unresolved_items", []).extend(
                         f"OCR/text extraction empty or failed: {item}" for item in failed_pages
