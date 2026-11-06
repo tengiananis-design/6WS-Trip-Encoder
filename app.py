@@ -227,6 +227,22 @@ async def get_analysis_result(batch_id: str):
     return json.loads(result_file.read_text(encoding="utf-8"))
 
 
+@app.put("/api/results/{batch_id}")
+async def save_analysis_result(batch_id: str, result: dict):
+    safe_batch_dir(batch_id)
+    result_file = RESULT_DIR / f"{batch_id}.json"
+    if not result_file.exists():
+        raise HTTPException(status_code=404, detail="Analysis result not found.")
+    # Never allow a browser edit to bypass the review gate.
+    if result.get("approval_status") == "approved" and result.get("overall_review_required") is not False:
+        raise HTTPException(status_code=409, detail="Resolve all review flags before approval.")
+    result["batch_id"] = batch_id
+    temporary = RESULT_DIR / f"{batch_id}.json.tmp"
+    temporary.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(result_file)
+    return {"message": "Review state saved.", "approval_status": result.get("approval_status", "pending_review")}
+
+
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str):
     safe_batch_dir(batch_id)
