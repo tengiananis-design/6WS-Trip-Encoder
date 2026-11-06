@@ -2,16 +2,18 @@ import os
 import json
 import logging
 import re
+import asyncio
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 APP_NAME = "6WS Trip Encoder"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -31,28 +33,86 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION,
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _status_path(batch_id: str) -> Path:
+    return RESULT_DIR / f"{batch_id}.status.json"
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _update_batch_manifest(batch_id: str, status: str):
+    manifest_path = UPLOAD_DIR / batch_id / "batch.json"
+    manifest = _read_json(manifest_path)
+    if manifest:
+        manifest["status"] = status
+        manifest["updated_at"] = utc_now()
+        _atomic_json(manifest_path, manifest)
+
+
+async def _run_analysis_job(batch_id: str):
+    batch_dir = UPLOAD_DIR / batch_id
+    status_path = _status_path(batch_id)
+    state = _read_json(status_path) or {"batch_id": batch_id}
+    state.update({"status": "processing", "started_at": utc_now(), "error": None})
+    _atomic_json(status_path, state)
+    _update_batch_manifest(batch_id, "processing")
+    try:
+        from services.ai_analyzer import analyze_batch_documents
+        result = await analyze_batch_documents(batch_dir)
+        result["job_status"] = "completed"
+        result["completed_at"] = utc_now()
+        _atomic_json(RESULT_DIR / f"{batch_id}.json", result)
+        state.update({"status": "completed", "completed_at": utc_now(),
+                      "documents_processed": result.get("documents_processed", 0),
+                      "documents_total": result.get("documents_total", 0)})
+        _atomic_json(status_path, state)
+        _update_batch_manifest(batch_id, "completed")
+    except Exception as error:
+        logger.exception("Analysis failed for batch %s", batch_id)
+        state.update({"status": "failed", "failed_at": utc_now(), "error": str(error)})
+        _atomic_json(status_path, state)
+        _update_batch_manifest(batch_id, "failed")
+
 
 @app.get("/health")
 async def health():
     return {"application": APP_NAME, "version": APP_VERSION, "status": "online", "timestamp": utc_now()}
+
 
 @app.get("/api/status")
 async def application_status():
     return {
         "status": "ready",
         "pdf_processing": "streamed_to_disk",
+        "analysis_execution": "background_task_single_web_instance",
+        "queue_durability": "not_durable_restart_may_interrupt_jobs",
         "max_files_per_batch": MAX_FILES_PER_BATCH,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
         "max_batch_size_mb": MAX_BATCH_SIZE_MB,
-        "ai_analysis": "per_document",
         "google_sheets": "requires_credentials_and_spreadsheet_configuration"
     }
+
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "app_name": APP_NAME, "version": APP_VERSION})
+
 
 @app.post("/api/upload")
 async def upload_documents(files: list[UploadFile] = File(...)):
@@ -129,14 +189,13 @@ async def upload_documents(files: list[UploadFile] = File(...)):
             "rejected_files": rejected_files,
             "status": "uploaded"
         }
-        (batch_dir / "batch.json").write_text(json.dumps(batch_information, indent=2), encoding="utf-8")
+        _atomic_json(batch_dir / "batch.json", batch_information)
         return {"message": "Documents uploaded successfully.", **batch_information}
     except Exception:
-        # Keep successfully uploaded files only when the batch manifest was written.
         if not (batch_dir / "batch.json").exists():
-            import shutil
             shutil.rmtree(batch_dir, ignore_errors=True)
         raise
+
 
 @app.get("/api/batches")
 async def list_batches():
@@ -144,51 +203,64 @@ async def list_batches():
     for batch_dir in sorted(UPLOAD_DIR.iterdir(), reverse=True):
         batch_file = batch_dir / "batch.json"
         if batch_dir.is_dir() and batch_file.exists():
-            try:
-                batches.append(json.loads(batch_file.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                logger.warning("Unable to read batch manifest: %s", batch_file)
+            manifest = _read_json(batch_file)
+            if manifest:
+                state = _read_json(_status_path(batch_dir.name))
+                if state:
+                    manifest["status"] = state.get("status", manifest.get("status"))
+                batches.append(manifest)
     return {"batches": batches}
 
+
 @app.post("/api/analyze/{batch_id}")
-async def analyze_batch(batch_id: str):
+async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
         raise HTTPException(status_code=400, detail="Invalid batch ID.")
     batch_dir = UPLOAD_DIR / batch_id
     if not batch_dir.is_dir() or not (batch_dir / "batch.json").exists():
         raise HTTPException(status_code=404, detail="Batch not found.")
-    result_file = RESULT_DIR / f"{batch_id}.json"
-    try:
-        from services.ai_analyzer import analyze_batch_documents
-        result = await analyze_batch_documents(batch_dir)
-        temp_file = result_file.with_suffix(".json.tmp")
-        temp_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-        temp_file.replace(result_file)
-        return {"message": "Analysis completed.", "batch_id": batch_id, "result": result}
-    except Exception as error:
-        logger.exception("Analysis failed for batch %s", batch_id)
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(error)}")
+
+    state = _read_json(_status_path(batch_id)) or {}
+    if state.get("status") in ("queued", "processing"):
+        return {"message": "Analysis is already running.", "batch_id": batch_id, "status": state["status"]}
+    if (RESULT_DIR / f"{batch_id}.json").exists():
+        return {"message": "Analysis already completed.", "batch_id": batch_id, "status": "completed"}
+
+    queued = {"batch_id": batch_id, "status": "queued", "queued_at": utc_now(), "error": None}
+    _atomic_json(_status_path(batch_id), queued)
+    _update_batch_manifest(batch_id, "queued")
+    background_tasks.add_task(_run_analysis_job, batch_id)
+    return {"message": "Analysis queued.", "batch_id": batch_id, "status": "queued"}
+
 
 @app.get("/api/results/{batch_id}")
 async def get_analysis_result(batch_id: str):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
         raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    status = _read_json(_status_path(batch_id))
     result_file = RESULT_DIR / f"{batch_id}.json"
-    if not result_file.exists():
-        raise HTTPException(status_code=404, detail="Analysis result not found.")
-    return json.loads(result_file.read_text(encoding="utf-8"))
+    if result_file.exists():
+        result = _read_json(result_file)
+        if result is not None:
+            return {"status": "completed", "result": result}
+    if status:
+        return status
+    raise HTTPException(status_code=404, detail="No analysis has been started for this batch.")
+
 
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str):
-    raise HTTPException(status_code=501, detail="Export is disabled until the TENGS column mapping and approval workflow are verified.")
+    raise HTTPException(status_code=501, detail="Export is disabled until persistent human approval, live sheet verification, and duplicate-safe writes are implemented.")
+
 
 @app.get("/api")
 async def api_information():
     return {"name": APP_NAME, "version": APP_VERSION, "workflow": [
-        "Upload PDF documents", "Extract each PDF independently", "Analyze documents in bounded requests",
-        "Group only exact normalized driver identities", "Normalize trip and reimbursement records",
+        "Upload PDF documents", "Queue batch analysis in a background task",
+        "Extract each PDF independently", "Group exact normalized driver identities",
         "Review all extracted information", "Export only after verified approval and sheet mapping"
     ]}
+
 
 @app.on_event("startup")
 async def startup_event():
