@@ -60,6 +60,8 @@ def normalize_expense(
         review_flags.append(
             "Reimbursement location is missing."
         )
+    if not expense.get("source_references"):
+        review_flags.append("Reimbursement source PDF/page references are missing.")
 
     return {
         "driver_name": expense.get("driver_name"),
