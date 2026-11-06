@@ -1,12 +1,13 @@
 import os
 import json
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
 from google import genai
 from google.genai import types
 from services.ocr_engine import extract_complete_pdf
-from services.driver_grouping import group_documents_by_driver
+from services.driver_grouping import group_documents_by_driver, normalize_driver_name
 from services.trip_processor import process_all_trips
 from services.reimbursement_processor import process_reimbursements
 
@@ -84,7 +85,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
     extraction_errors = []
     for index, pdf_path in enumerate(pdf_files, start=1):
         try:
-            extraction = extract_complete_pdf(pdf_path)
+            extraction = await asyncio.to_thread(extract_complete_pdf, pdf_path)
             pages = extraction.get("pages", [])
             if extraction.get("status") == "ocr_not_installed":
                 raise RuntimeError(extraction.get("message", "OCR is unavailable."))
@@ -96,7 +97,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                 "total_pages": extraction.get("total_pages"),
                 "pages": pages
             }]
-            analysis = analyze_documents(prompt_doc)
+            analysis = await asyncio.to_thread(analyze_documents, prompt_doc)
             docs = analysis.get("documents") or [{
                 "filename": pdf_path.name,
                 "document_type": classify_document(pdf_path.name, "\n".join(p.get("text","") for p in pages)),
@@ -109,6 +110,8 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
             analysis["documents"] = docs
             analysis["source_filename"] = pdf_path.name
             analysis["extraction_status"] = extraction.get("status")
+            analysis["page_extraction_review_required"] = any(page.get("status") == "failed" for page in pages)
+            analysis["document_type_review_required"] = any(doc.get("document_type") == "unknown" for doc in docs)
             per_document_results.append(analysis)
         except Exception as error:
             logger.exception("Failed to process %s", pdf_path.name)
@@ -125,7 +128,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
     by_driver = {}
     for item in per_document_results:
         name = _driver_name(item)
-        key = " ".join(name.upper().split()) if name else ""
+        key = normalize_driver_name(name)
         if not key:
             continue
         bucket = by_driver.setdefault(key, {
@@ -158,6 +161,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
         })
 
     overall_review = bool(extraction_errors or grouping["unidentified_documents"] or grouping["review_items"])
+    overall_review = overall_review or any(item.get("page_extraction_review_required") or item.get("document_type_review_required") for item in per_document_results)
     overall_review = overall_review or any(
         d.get("unresolved_items") or any(t.get("review_flags") for t in d.get("trips", []))
         or any(x.get("review_flags") for x in d.get("toll_reimbursements", []) + d.get("parking_reimbursements", []))
@@ -180,6 +184,6 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
         "toll_reimbursements": [row for driver in driver_results for row in driver["toll_reimbursements"]],
         "parking_reimbursements": [row for driver in driver_results for row in driver["parking_reimbursements"]],
         "unresolved_items": [item for driver in driver_results for item in driver["unresolved_items"]],
-        "overall_review_required": True if overall_review else True,
+        "overall_review_required": True,  # Manual review/export workflow is not yet implemented.
         "approval_status": "pending_review"
     }

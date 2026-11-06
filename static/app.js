@@ -87,7 +87,7 @@ function addSelectedFiles(files) {
 
     const validFiles = incomingFiles.filter(file =>
         file.name.toLowerCase().endsWith(".pdf") &&
-        file.type === "application/pdf"
+        (!file.type || file.type === "application/pdf")
     );
 
     const invalidCount = incomingFiles.length - validFiles.length;
