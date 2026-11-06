@@ -163,6 +163,8 @@ def _merge_record(target: dict, incoming: dict, label: str) -> dict:
     merged = dict(target)
     conflicts = list(merged.get("review_flags") or [])
     for key, value in incoming.items():
+        if key == "_analysis_window":
+            continue
         if key in ("source_pages", "pages_used"):
             merged[key] = sorted(set(merged.get(key) or []) | set(value or []),
                                  key=lambda item: (str(type(item)), str(item)))
