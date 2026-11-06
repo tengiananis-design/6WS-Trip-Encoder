@@ -29,13 +29,16 @@ def extract_pdf_text(pdf_path: str | Path) -> dict[str, Any]:
         document = fitz.open(pdf_path)
 
         for page_number, page in enumerate(document, start=1):
-            text = page.get_text("text", sort=True)
+            text = page.get_text("text", sort=True).strip()
+            # Sparse text layers are common in scanned PDFs that contain only
+            # a page number or a faint OCR layer. Send those pages through OCR.
+            requires_ocr = len(text) < 30
 
             pages.append({
                 "page_number": page_number,
-                "text": text.strip(),
-                "has_text": bool(text.strip()),
-                "requires_ocr": not bool(text.strip())
+                "text": text,
+                "has_text": bool(text),
+                "requires_ocr": requires_ocr
             })
 
         total_pages = len(document)
