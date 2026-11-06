@@ -50,8 +50,9 @@ async def application_status():
         "status": "ready",
         "pdf_processing": "available",
         "ai_analysis": "configured" if os.getenv("GEMINI_API_KEY") else "missing_api_key",
-        "google_sheets": "configured" if os.getenv("GOOGLE_SPREADSHEET_ID") else "missing_spreadsheet_id",
-        "storage": str(DATA_DIR)
+        "google_sheets": "configured" if (os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEETS_ID")) else "missing_spreadsheet_id",
+        "storage": "shared_object_storage" if (os.getenv("S3_BUCKET") and os.getenv("S3_ACCESS_KEY_ID") and os.getenv("S3_SECRET_ACCESS_KEY")) else "local_filesystem",
+        "distributed_queue": "configured" if (os.getenv("REDIS_URL") and os.getenv("S3_BUCKET")) else "local_fallback"
     }
 
 
