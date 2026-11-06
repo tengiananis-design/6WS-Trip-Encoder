@@ -150,6 +150,7 @@ def process_trip(trip: dict) -> dict:
     trip_date = trip.get("trip_date")
 
     return {
+        "driver_name": trip.get("driver_name"),
         "trip_ticket_number": trip.get("trip_ticket_number"),
         "line_haul_trip_number": trip.get(
             "line_haul_trip_number"
