@@ -3,8 +3,10 @@ name: Backend checks
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [backend-rebuild]
+
+concurrency:
+  group: 6ws-backend-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   python-checks:
