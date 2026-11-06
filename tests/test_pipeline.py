@@ -12,12 +12,14 @@ class PipelineValidationTests(unittest.TestCase):
                 {"driver": {"name": "PEDRO SANTOS", "confidence": "high"}, "documents": []},
             ],
             "trips": [
-                {"driver_name": "JUAN DELA CRUZ", "segments": [
-                    {"origin": "SOC 6", "destination": "MFM Pulilan", "movement_type": "outbound"}
-                ]},
-                {"driver_name": "PEDRO SANTOS", "segments": [
-                    {"origin": "SOC 6", "destination": "MFM Marikina", "movement_type": "outbound"}
-                ]},
+                {"driver_name": "JUAN DELA CRUZ", "trip_date": "2026-11-01", "line_haul_trip_number": "LH-001",
+                 "source_references": [{"filename": "juan.pdf", "page_number": 1}],
+                 "segments": [{"origin": "SOC 6", "destination": "MFM Pulilan", "movement_type": "outbound",
+                               "source_references": [{"filename": "juan.pdf", "page_number": 1}]}]},
+                {"driver_name": "PEDRO SANTOS", "trip_date": "2026-11-01", "line_haul_trip_number": "LH-002",
+                 "source_references": [{"filename": "pedro.pdf", "page_number": 1}],
+                 "segments": [{"origin": "SOC 6", "destination": "MFM Marikina", "movement_type": "outbound",
+                               "source_references": [{"filename": "pedro.pdf", "page_number": 1}]}]},
             ],
             "toll_reimbursements": [],
             "parking_reimbursements": [],
