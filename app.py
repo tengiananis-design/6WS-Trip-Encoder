@@ -122,6 +122,11 @@ async def upload_documents(files: list[UploadFile] = File(...)):
             "documents": uploaded_files,
             "status": "uploaded"
         }
+        from services import storage
+        if storage.shared_storage_enabled():
+            for item in uploaded_files:
+                storage.upload_file(f"uploads/{batch_id}/{item['filename']}", batch_dir / item["filename"], "application/pdf")
+            storage.save_json(f"uploads/{batch_id}/batch.json", batch_info)
         (batch_dir / "batch.json").write_text(json.dumps(batch_info, indent=2), encoding="utf-8")
         return {"message": "Documents uploaded successfully.", **batch_info}
     except Exception:
@@ -191,11 +196,20 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     if (RESULT_DIR / f"{batch_id}.json").is_file():
         raise HTTPException(status_code=409, detail="Analysis result already exists. Review it instead of running analysis again.")
     total = len(list(batch_dir.glob("*.pdf")))
+    from services import storage
+    if storage.shared_storage_enabled() and __import__("os").getenv("REDIS_URL"):
+        from services.tasks import analyze_batch_task
+        task = analyze_batch_task.apply_async(args=[batch_id])
+        job = {"batch_id": batch_id, "task_id": task.id, "status": "queued", "stage": "queued",
+               "completed_documents": 0, "total_documents": total,
+               "queued_at": datetime.now(timezone.utc).isoformat()}
+        storage.save_json(f"jobs/{batch_id}.json", job)
+        return {"message": "Distributed analysis queued.", "batch_id": batch_id, "job": job}
     write_job(batch_dir, batch_id=batch_id, status="queued", stage="queued",
               completed_documents=0, total_documents=total, error=None,
               queued_at=datetime.now(timezone.utc).isoformat())
     background_tasks.add_task(_run_analysis_job, batch_id, batch_dir)
-    return {"message": "Analysis queued. You can monitor progress.", "batch_id": batch_id,
+    return {"message": "Local fallback queued. Configure shared storage and REDIS_URL for worker processing.", "batch_id": batch_id,
             "job": read_job(batch_dir)}
 
 
