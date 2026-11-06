@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -66,13 +67,35 @@ EVIDENCE:
 """
 
 
+def _generate_with_retry(client, prompt: str):
+    attempts = max(1, int(os.getenv("GEMINI_MAX_RETRIES", "3")))
+    for attempt in range(attempts):
+        try:
+            return client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
+            )
+        except Exception as error:
+            status_code = getattr(error, "status_code", None) or getattr(error, "code", None)
+            message = str(error).lower()
+            transient = (
+                status_code in (408, 429, 500, 502, 503, 504)
+                or any(term in message for term in (
+                    "rate limit", "resource exhausted", "temporarily unavailable",
+                    "timed out", "timeout", "connection reset", "service unavailable"
+                ))
+            )
+            if not transient or attempt + 1 >= attempts:
+                raise
+            delay = min(2 ** (attempt + 1), 15)
+            logger.warning("Transient Gemini API error; retry %s/%s in %ss: %s", attempt + 1, attempts - 1, delay, error)
+            time.sleep(delay)
+
+
 def analyze_documents(documents: list[dict]) -> dict[str, Any]:
     client = get_ai_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=build_analysis_prompt(documents),
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
-    )
+    response = _generate_with_retry(client, build_analysis_prompt(documents))
     if not response.text:
         raise RuntimeError("AI returned an empty analysis response.")
     try:
