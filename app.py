@@ -248,11 +248,17 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     status_file = analysis_status_path(batch_id)
     if status_file.exists():
         current = json.loads(status_file.read_text(encoding="utf-8"))
-        if current.get("status") == "processing":
+        if current.get("status") in ("queued", "processing"):
             return current
+
+    # A deliberate rerun must never leave an older result visible while the
+    # new analysis is queued or running. Remove stale output before scheduling.
+    result_file = RESULT_DIR / f"{batch_id}.json"
+    result_file.unlink(missing_ok=True)
     write_analysis_status(batch_id, {
         "batch_id": batch_id, "status": "queued",
-        "message": "Analysis queued."
+        "message": "Analysis queued.",
+        "queued_at": datetime.utcnow().isoformat()
     })
     background_tasks.add_task(run_analysis_task, batch_id)
     return {
