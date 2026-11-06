@@ -355,6 +355,16 @@ async def save_reviewed_result(batch_id: str, request: Request):
 
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str, request: Request):
+    from services.approval_lock import approval_lock
+    batch_id = safe_batch_id(batch_id)
+    try:
+        with approval_lock(batch_id):
+            return await _approve_batch_locked(batch_id, request)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+
+
+async def _approve_batch_locked(batch_id: str, request: Request):
     from services import storage
     batch_id = safe_batch_id(batch_id)
     result_key = f"results/{batch_id}.json"
