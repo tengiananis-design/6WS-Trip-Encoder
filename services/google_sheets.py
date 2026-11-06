@@ -1,225 +1,155 @@
-
 import os
+import json
 import logging
 from typing import Any
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID") or os.getenv("GOOGLE_SHEETS_ID")
+SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials/service-account.json")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets"
+# Exact worksheet names and column order taken from the user's TENGS.xlsx workbook.
+SUMMARY_SHEET_NAME = os.getenv("TENGS_SUMMARY_SHEET", "SUMMARY")
+TOLL_SHEET_NAME = os.getenv("TENGS_TOLL_SHEET", "TOLL")
+PARKING_SHEET_NAME = os.getenv("TENGS_PARKING_SHEET", "PARKING")
+PASSWAY_SHEET_NAME = os.getenv("TENGS_PASSWAY_SHEET", "PASSWAY")
+
+SUMMARY_HEADERS = [
+    "CHECK IN TIME (ACTUAL)", "VALID TIME (circled)", "DOCKING TIME",
+    "DOCKING DATE OR CHECK OUT DATE", "CHECK OUT TIME", "DATE OF TRIP",
+    "LINEHAUL TRIP NO", "ID NO", "DRIVER'S NAME", "PLATENO.", "FLEET TYPE",
+    "ORIGIN", "DROP OFFS", "DESTINATION", "WITH BACKLOAD",
+    "DEMMURAGE AVAILMENT", "REMARKS", "LATE"
 ]
-
-SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
-
-SERVICE_ACCOUNT_FILE = os.getenv(
-    "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "credentials/service-account.json"
-)
-
-TRIP_SHEET_NAME = os.getenv(
-    "TRIP_SHEET_NAME",
-    "Trip Encoding"
-)
-
-TOLL_SHEET_NAME = os.getenv(
-    "TOLL_SHEET_NAME",
-    "Toll Reimbursements"
-)
-
-PARKING_SHEET_NAME = os.getenv(
-    "PARKING_SHEET_NAME",
-    "Parking Reimbursements"
-)
+TOLL_HEADERS = [
+    "DATE", "LINEHAULTRIP", "ID NO", "DRIVER'S NAME", "PLATE NO.",
+    "FLEET TYPE", "ORIGIN", "DESTINATION", "RFID TOLL CHARGES",
+    "ENTRY POINT", "EXIT POINT", "DATE OF O.R.", "TAG NUMBER", "AMOUNT"
+]
+EXPENSE_HEADERS = [
+    "DATE OF TRIP", "LINEHAUL TRIP NO", "ID NO", "DRIVER'S NAME",
+    "PLATE NO.", "FLEET TYPE", "ORIGIN", "DESTINATION", "VENDORS NAME",
+    "ADDRESS", "DATE OF O.R.", "TAG NUMBER", "AMOUNT"
+]
 
 
 def get_sheets_service():
-    """Authenticate using a Google service account."""
-
     if not SPREADSHEET_ID:
-        raise RuntimeError(
-            "GOOGLE_SPREADSHEET_ID is not configured."
-        )
-
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        raise RuntimeError(
-            "Google service account credentials were not found."
-        )
-
-    credentials = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=SCOPES
-    )
-
-    return build(
-        "sheets",
-        "v4",
-        credentials=credentials,
-        cache_discovery=False
-    )
+        raise RuntimeError("Set GOOGLE_SPREADSHEET_ID (or GOOGLE_SHEETS_ID).")
+    if SERVICE_ACCOUNT_JSON:
+        try:
+            info = json.loads(SERVICE_ACCOUNT_JSON)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON.") from error
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    elif os.path.exists(SERVICE_ACCOUNT_FILE):
+        credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    else:
+        raise RuntimeError("Set GOOGLE_SERVICE_ACCOUNT_JSON or provide a service-account credentials file.")
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
 
-def append_rows(
-    service,
-    sheet_name: str,
-    rows: list[list[Any]]
-) -> dict:
-    """Append rows to a specified worksheet."""
-
-    if not rows:
-        return {
-            "sheet": sheet_name,
-            "rows_added": 0
-        }
-
-    body = {
-        "values": rows
-    }
-
-    result = service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{sheet_name}'!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body=body
-    ).execute()
-
-    return {
-        "sheet": sheet_name,
-        "rows_added": result.get(
-            "updates", {}
-        ).get("updatedRows", 0)
-    }
+def _driver_value(driver: Any, key: str):
+    return driver.get(key) if isinstance(driver, dict) else None
 
 
-def prepare_trip_rows(result: dict) -> list[list[Any]]:
-    """Prepare trip records for the provisional worksheet."""
-
+def prepare_summary_rows(result: dict) -> list[list[Any]]:
     rows = []
-
-    for trip in result.get("trips", []):
-        for segment in trip.get("segments", []):
+    for driver_result in result.get("drivers", []):
+        driver = driver_result.get("driver", {})
+        for trip in driver_result.get("trips", []):
             rows.append([
-                result.get("driver", {}).get("name"),
-                trip.get("trip_date"),
-                trip.get("trip_ticket_number"),
-                trip.get("line_haul_trip_number"),
-                segment.get("sequence"),
-                segment.get("origin"),
-                segment.get("destination"),
-                segment.get("departure_time"),
-                segment.get("arrival_time"),
-                segment.get("movement_type"),
                 trip.get("check_in_time_actual"),
+                trip.get("valid_time_circled"),
                 trip.get("docking_time"),
-                trip.get("check_out_time_actual"),
-                "APPROVED"
+                trip.get("docking_date_or_check_out_date"),
+                trip.get("check_out_time"),
+                trip.get("trip_date"),
+                trip.get("line_haul_trip_number"),
+                trip.get("driver_id") or _driver_value(driver, "id"),
+                trip.get("driver_name") or _driver_value(driver, "name"),
+                trip.get("plate_no"),
+                trip.get("fleet_type"),
+                trip.get("origin"),
+                " / ".join(trip.get("drop_offs", []) or []),
+                trip.get("destination"),
+                trip.get("with_backload"),
+                trip.get("demurrage_availment"),
+                trip.get("remarks"),
+                trip.get("late"),
             ])
-
     return rows
 
 
-def prepare_reimbursement_rows(
-    records: list[dict],
-    driver_name: str
-) -> list[list[Any]]:
-    """Prepare reimbursement records for spreadsheet export."""
-
+def prepare_toll_rows(result: dict) -> list[list[Any]]:
     rows = []
-
-    for record in records:
-        rows.append([
-            driver_name,
-            record.get("date"),
-            record.get("location"),
-            record.get("amount"),
-            record.get("receipt_reference"),
-            ",".join(
-                str(page)
-                for page in record.get("source_pages", [])
-            ),
-            "APPROVED"
-        ])
-
+    for driver_result in result.get("drivers", []):
+        for record in driver_result.get("toll_reimbursements", []):
+            rows.append([
+                record.get("date") or record.get("trip_date"),
+                record.get("line_haul_trip_number"),
+                record.get("driver_id"),
+                record.get("driver_name") or _driver_value(driver_result.get("driver"), "name"),
+                record.get("plate_no"),
+                record.get("fleet_type"),
+                record.get("origin"),
+                record.get("destination"),
+                record.get("rfid_toll_charges"),
+                record.get("entry_point"),
+                record.get("exit_point"),
+                record.get("date_of_or"),
+                record.get("tag_number"),
+                record.get("amount"),
+            ])
     return rows
 
 
-async def export_approved_batch(
-    batch_id: str,
-    result: dict
-) -> dict:
-    """
-    Export approved records to Google Sheets.
+def _prepare_vendor_rows(result: dict, field: str) -> list[list[Any]]:
+    rows = []
+    for driver_result in result.get("drivers", []):
+        for record in driver_result.get(field, []):
+            rows.append([
+                record.get("trip_date"),
+                record.get("line_haul_trip_number"),
+                record.get("driver_id"),
+                record.get("driver_name") or _driver_value(driver_result.get("driver"), "name"),
+                record.get("plate_no"),
+                record.get("fleet_type"),
+                record.get("origin"),
+                record.get("destination"),
+                record.get("vendor_name"),
+                record.get("address"),
+                record.get("date_of_or"),
+                record.get("tag_number"),
+                record.get("amount"),
+            ])
+    return rows
 
-    This is a provisional export layout.
-    It must be mapped to the user's actual TENGS
-    spreadsheet before production use.
-    """
 
-    if result.get("approval_status") != "approved":
-        raise ValueError(
-            "Batch must be approved before export."
-        )
+def prepare_parking_rows(result: dict) -> list[list[Any]]:
+    return _prepare_vendor_rows(result, "parking_reimbursements")
 
-    service = get_sheets_service()
 
-    driver_name = (
-        result.get("driver", {}).get("name")
-        or "UNKNOWN"
-    )
+def prepare_passway_rows(result: dict) -> list[list[Any]]:
+    return _prepare_vendor_rows(result, "passway_reimbursements")
 
-    trip_rows = prepare_trip_rows(result)
 
-    toll_rows = prepare_reimbursement_rows(
-        result.get("toll_reimbursements", []),
-        driver_name
-    )
-
-    parking_rows = prepare_reimbursement_rows(
-        result.get("parking_reimbursements", []),
-        driver_name
-    )
-
-    exports = []
-
-    try:
-        exports.append(
-            append_rows(
-                service,
-                TRIP_SHEET_NAME,
-                trip_rows
-            )
-        )
-
-        exports.append(
-            append_rows(
-                service,
-                TOLL_SHEET_NAME,
-                toll_rows
-            )
-        )
-
-        exports.append(
-            append_rows(
-                service,
-                PARKING_SHEET_NAME,
-                parking_rows
-            )
-        )
-
-    except HttpError:
-        logger.exception(
-            "Google Sheets export failed for batch %s",
-            batch_id
-        )
-        raise
-
+def prepare_tengs_rows(result: dict) -> dict[str, list[list[Any]]]:
+    """Prepare exact-width rows for the TENGS workbook. Does not write to Sheets."""
     return {
-        "batch_id": batch_id,
-        "driver": driver_name,
-        "exports": exports,
-        "status": "exported"
+        SUMMARY_SHEET_NAME: prepare_summary_rows(result),
+        TOLL_SHEET_NAME: prepare_toll_rows(result),
+        PARKING_SHEET_NAME: prepare_parking_rows(result),
+        PASSWAY_SHEET_NAME: prepare_passway_rows(result),
     }
+
+
+async def export_approved_batch(batch_id: str, result: dict) -> dict:
+    raise RuntimeError(
+        "Export remains disabled until persistent human approval, the live Google Sheet "
+        "is verified, and duplicate-safe write behavior is implemented."
+    )

@@ -1,315 +1,626 @@
-
-import os
 import json
 import logging
+import os
+import re
+import shutil
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import HTMLResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+import base64
+import hmac
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-# --------------------------------------------------
-# APPLICATION CONFIGURATION
-# --------------------------------------------------
-
 APP_NAME = "6WS Trip Encoder"
-APP_VERSION = "1.0.0"
-
+APP_VERSION = "1.3.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
+for folder in (DATA_DIR, UPLOAD_DIR, RESULT_DIR):
+    folder.mkdir(parents=True, exist_ok=True)
 
-for directory in (DATA_DIR, UPLOAD_DIR, RESULT_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(level=logging.INFO)
+MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "200"))
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+MAX_BATCH_SIZE_MB = int(os.getenv("MAX_BATCH_SIZE_MB", "1024"))
+CHUNK_SIZE = 1024 * 1024
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(APP_NAME)
 
-app = FastAPI(
-    title=APP_NAME,
-    version=APP_VERSION,
-    description="AI-assisted trip and reimbursement encoding system"
-)
+class DashboardAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        username = os.getenv("APP_USERNAME")
+        password = os.getenv("APP_PASSWORD")
+        if not username or not password:
+            return Response(
+                "Application access is not configured. Set APP_USERNAME and APP_PASSWORD.",
+                status_code=503
+            )
+        try:
+            scheme, encoded = request.headers.get("authorization", "").split(" ", 1)
+            if scheme.lower() != "basic":
+                raise ValueError("Unsupported authentication scheme")
+            supplied_user, supplied_password = base64.b64decode(encoded).decode("utf-8").split(":", 1)
+        except Exception:
+            return Response(
+                "Authentication required.",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="6WS Trip Encoder"'}
+            )
+        valid_user = hmac.compare_digest(supplied_user, username)
+        valid_password = hmac.compare_digest(supplied_password, password)
+        if not (valid_user and valid_password):
+            return Response(
+                "Invalid credentials.",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="6WS Trip Encoder"'}
+            )
+        return await call_next(request)
 
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
+app.add_middleware(DashboardAuthMiddleware)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-app.mount(
-    "/static",
-    StaticFiles(directory=str(BASE_DIR / "static")),
-    name="static"
-)
 
-# --------------------------------------------------
-# APPLICATION HEALTH
-# --------------------------------------------------
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_manual_driver_name(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
+
+
+def unique_pdf_filename(original: str, index: int, seen_names: set[str]) -> str:
+    original_name = Path(original or "").name
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._")
+    stem = (stem or f"document_{index}")[:120].strip("._") or f"document_{index}"
+    candidate = f"{stem}.pdf"
+    suffix = 2
+    while candidate.lower() in seen_names:
+        candidate = f"{stem}_{suffix}.pdf"
+        suffix += 1
+    seen_names.add(candidate.lower())
+    return candidate
+
+
+def atomic_json(path: Path, value: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp.replace(path)
+
+
+def local_manifest(batch_id):
+    return UPLOAD_DIR / batch_id / "batch.json"
+
+
+def local_status(batch_id):
+    return RESULT_DIR / f"{batch_id}.status.json"
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def durable_storage():
+    # Use remote object storage only when the Redis worker queue is also enabled.
+    # Otherwise files must remain local so the development fallback can read them.
+    if not (os.getenv("REDIS_URL") and os.getenv("S3_BUCKET")):
+        return None
+    from services.storage import S3Storage
+    return S3Storage.from_environment(required=True)
+
+
+def durable_queue_enabled():
+    return bool(os.getenv("REDIS_URL") and os.getenv("S3_BUCKET"))
+
+
+def set_batch_status(batch_id, status, **extra):
+    state = {"batch_id": batch_id, "status": status, "updated_at": utc_now(), **extra}
+    storage = durable_storage()
+    if storage:
+        storage.put_json(f"batches/{batch_id}/status.json", state)
+    else:
+        atomic_json(local_status(batch_id), state)
+    manifest = get_manifest(batch_id)
+    if manifest:
+        manifest["status"] = status
+        manifest["updated_at"] = utc_now()
+        save_manifest(batch_id, manifest)
+    return state
+
+
+def save_manifest(batch_id, manifest):
+    storage = durable_storage()
+    if storage:
+        storage.put_json(f"batches/{batch_id}/manifest.json", manifest)
+    else:
+        atomic_json(local_manifest(batch_id), manifest)
+
+
+def get_manifest(batch_id):
+    storage = durable_storage()
+    if storage:
+        return storage.get_json(f"batches/{batch_id}/manifest.json")
+    return read_json(local_manifest(batch_id))
+
+
+def get_status(batch_id):
+    storage = durable_storage()
+    if storage:
+        return storage.get_json(f"batches/{batch_id}/status.json")
+    return read_json(local_status(batch_id))
+
+
+def get_result(batch_id):
+    storage = durable_storage()
+    if storage:
+        return storage.get_json(f"batches/{batch_id}/result.json")
+    return read_json(RESULT_DIR / f"{batch_id}.json")
+
+
+def materialize_source_file(batch_id, filename, destination):
+    manifest = get_manifest(batch_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    document = next((item for item in manifest.get("documents", [])
+                     if item.get("filename") == filename), None)
+    if not document:
+        raise HTTPException(status_code=404, detail="Source PDF not found in this batch.")
+    storage = durable_storage()
+    if storage:
+        key = document.get("storage_key")
+        if not key:
+            raise HTTPException(status_code=404, detail="Source storage reference is missing.")
+        storage.get_file(key, destination)
+    else:
+        relative = document.get("path")
+        if not relative:
+            raise HTTPException(status_code=404, detail="Source file path is missing.")
+        source = (BASE_DIR / relative).resolve()
+        allowed_root = (UPLOAD_DIR / batch_id).resolve()
+        if allowed_root not in source.parents or not source.is_file():
+            raise HTTPException(status_code=404, detail="Source PDF is unavailable.")
+        shutil.copyfile(source, destination)
+    return document
+
+
+async def run_local_analysis(batch_id):
+    batch_dir = UPLOAD_DIR / batch_id
+    try:
+        from services.ai_analyzer import analyze_batch_documents
+        set_batch_status(batch_id, "processing", documents_processed=0,
+                         documents_total=len(list(batch_dir.glob("*.pdf"))))
+        def report_progress(progress):
+            set_batch_status(batch_id, "processing", **progress)
+        result = await analyze_batch_documents(batch_dir, progress_callback=report_progress)
+        result["job_status"] = "completed"
+        result["completed_at"] = utc_now()
+        atomic_json(RESULT_DIR / f"{batch_id}.json", result)
+        set_batch_status(batch_id, "completed",
+                         documents_processed=result.get("documents_processed", 0),
+                         documents_total=result.get("documents_total", 0))
+    except Exception as error:
+        logger.exception("Local analysis failed for %s", batch_id)
+        set_batch_status(batch_id, "failed", error=str(error))
+
+
+def save_result(batch_id, result):
+    storage = durable_storage()
+    if storage:
+        storage.put_json(f"batches/{batch_id}/result.json", result)
+    else:
+        atomic_json(RESULT_DIR / f"{batch_id}.json", result)
+
 
 @app.get("/health")
 async def health():
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
-        "status": "online",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"application": APP_NAME, "version": APP_VERSION, "status": "online", "timestamp": utc_now()}
 
 
 @app.get("/api/status")
-async def application_status():
+async def api_status():
+    durable = durable_queue_enabled()
     return {
         "status": "ready",
-        "pdf_processing": "configured_by_service",
-        "ai_analysis": "configured_by_environment",
-        "google_sheets": "configured_by_environment"
+        "analysis_mode": "celery_worker" if durable else "local_background_task",
+        "durable_queue": durable,
+        "durable_file_storage": durable,
+        "worker_command": "celery -A worker.celery_app worker --loglevel=INFO --concurrency=1",
+        "limits": {"files_per_batch": MAX_FILES_PER_BATCH,
+                   "file_size_mb": MAX_FILE_SIZE_MB,
+                   "batch_size_mb": MAX_BATCH_SIZE_MB},
+        "export": "disabled_pending_approval_and_duplicate_safe_write"
     }
 
-
-# --------------------------------------------------
-# MAIN DASHBOARD
-# --------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "app_name": APP_NAME,
-            "version": APP_VERSION
-        }
-    )
+    return templates.TemplateResponse("index.html", {
+        "request": request, "app_name": APP_NAME, "version": APP_VERSION
+    })
 
-
-# --------------------------------------------------
-# PDF UPLOAD
-# --------------------------------------------------
 
 @app.post("/api/upload")
-async def upload_documents(
-    files: list[UploadFile] = File(...)
-):
+async def upload_documents(files: list[UploadFile] = File(...)):
     if not files:
-        raise HTTPException(
-            status_code=400,
-            detail="No PDF files selected."
-        )
+        raise HTTPException(status_code=400, detail="No PDF files selected.")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(status_code=413, detail=f"Maximum {MAX_FILES_PER_BATCH} PDFs per batch.")
 
-    batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    batch_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     batch_dir = UPLOAD_DIR / batch_id
-    batch_dir.mkdir(parents=True, exist_ok=True)
+    batch_dir.mkdir(parents=True, exist_ok=False)
+    storage = durable_storage()
+    uploaded_files, rejected_files = [], []
+    seen_names, batch_bytes = set(), 0
 
-    uploaded_files = []
-
-    for uploaded_file in files:
-        filename = Path(uploaded_file.filename or "").name
-
-        if not filename.lower().endswith(".pdf"):
-            continue
-
-        destination = batch_dir / filename
-
-        try:
-            contents = await uploaded_file.read()
-
-            if not contents.startswith(b"%PDF"):
+    try:
+        for index, uploaded in enumerate(files, start=1):
+            original = Path(uploaded.filename or "").name
+            if not original.lower().endswith(".pdf"):
+                rejected_files.append({"filename": original, "reason": "Only PDF files are accepted."})
+                await uploaded.close()
                 continue
 
-            destination.write_bytes(contents)
+            filename = unique_pdf_filename(original, index, seen_names)
+            destination = batch_dir / filename
+            total, signature = 0, b""
 
-            uploaded_files.append({
-                "filename": filename,
-                "size_bytes": len(contents),
-                "path": str(destination.relative_to(BASE_DIR))
+            try:
+                with destination.open("wb") as output:
+                    while True:
+                        chunk = await uploaded.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        if total == 0:
+                            signature = chunk[:5]
+                        total += len(chunk)
+                        if total > MAX_FILE_SIZE_MB * 1024 * 1024:
+                            raise ValueError(f"File exceeds {MAX_FILE_SIZE_MB} MB limit.")
+                        if batch_bytes + total > MAX_BATCH_SIZE_MB * 1024 * 1024:
+                            raise ValueError(f"Batch exceeds {MAX_BATCH_SIZE_MB} MB limit.")
+                        output.write(chunk)
+
+                if not signature.startswith(b"%PDF"):
+                    destination.unlink(missing_ok=True)
+                    rejected_files.append({"filename": original, "reason": "Invalid PDF file signature."})
+                    continue
+
+                item = {"filename": filename, "original_filename": original, "size_bytes": total}
+                if storage:
+                    object_key = f"batches/{batch_id}/files/{filename}"
+                    storage.put_file(object_key, destination)
+                    item["storage_key"] = object_key
+                    destination.unlink(missing_ok=True)
+                else:
+                    item["path"] = str(destination.relative_to(BASE_DIR))
+                uploaded_files.append(item)
+                batch_bytes += total
+            except Exception as error:
+                destination.unlink(missing_ok=True)
+                rejected_files.append({"filename": original, "reason": str(error)})
+            finally:
+                await uploaded.close()
+
+        if not uploaded_files:
+            raise HTTPException(status_code=400, detail={
+                "message": "No valid PDFs were uploaded.", "rejected_files": rejected_files
             })
 
-        finally:
-            await uploaded_file.close()
+        manifest = {
+            "batch_id": batch_id, "created_at": utc_now(),
+            "document_count": len(uploaded_files), "total_size_bytes": batch_bytes,
+            "documents": uploaded_files, "rejected_files": rejected_files,
+            "status": "uploaded"
+        }
+        save_manifest(batch_id, manifest)
+        return {"message": "Documents uploaded successfully.", **manifest}
+    except Exception:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        raise
 
-    if not uploaded_files:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid PDF files were uploaded."
-        )
-
-    batch_information = {
-        "batch_id": batch_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "document_count": len(uploaded_files),
-        "documents": uploaded_files,
-        "status": "uploaded"
-    }
-
-    batch_file = batch_dir / "batch.json"
-    batch_file.write_text(
-        json.dumps(batch_information, indent=2),
-        encoding="utf-8"
-    )
-
-    return {
-        "message": "Documents uploaded successfully.",
-        **batch_information
-    }
-
-
-# --------------------------------------------------
-# DOCUMENT INVENTORY
-# --------------------------------------------------
 
 @app.get("/api/batches")
 async def list_batches():
+    storage = durable_storage()
     batches = []
-
-    for batch_dir in sorted(UPLOAD_DIR.iterdir(), reverse=True):
-        batch_file = batch_dir / "batch.json"
-
-        if batch_dir.is_dir() and batch_file.exists():
-            try:
-                batches.append(
-                    json.loads(batch_file.read_text(encoding="utf-8"))
-                )
-            except json.JSONDecodeError:
-                logger.warning("Invalid batch file: %s", batch_file)
-
+    if storage:
+        for key in storage.list_keys("batches/"):
+            if key.endswith("/manifest.json"):
+                manifest = storage.get_json(key)
+                if manifest:
+                    state = storage.get_json(f"batches/{manifest['batch_id']}/status.json")
+                    if state:
+                        manifest["status"] = state.get("status", manifest.get("status"))
+                    batches.append(manifest)
+    else:
+        for batch_dir in sorted(UPLOAD_DIR.iterdir(), reverse=True):
+            if batch_dir.is_dir():
+                manifest = read_json(batch_dir / "batch.json")
+                if manifest:
+                    state = read_json(local_status(batch_dir.name))
+                    if state:
+                        manifest["status"] = state.get("status", manifest.get("status"))
+                    batches.append(manifest)
+    batches.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     return {"batches": batches}
 
 
-# --------------------------------------------------
-# AI DOCUMENT ANALYSIS
-# --------------------------------------------------
-
 @app.post("/api/analyze/{batch_id}")
-async def analyze_batch(batch_id: str):
-    batch_dir = UPLOAD_DIR / batch_id
+async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    manifest = get_manifest(batch_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    existing = get_status(batch_id) or {}
+    if existing.get("status") in ("queued", "processing"):
+        return {"batch_id": batch_id, "status": existing["status"], "message": "Analysis is already queued or running."}
+    if get_result(batch_id):
+        return {"batch_id": batch_id, "status": "completed", "message": "Analysis already completed."}
 
-    if not batch_dir.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Batch not found."
-        )
-
-    try:
-        # Implemented in services/ai_analyzer.py
-        from services.ai_analyzer import analyze_batch_documents
-
-        result = await analyze_batch_documents(batch_dir)
-
-        result_file = RESULT_DIR / f"{batch_id}.json"
-        result_file.write_text(
-            json.dumps(result, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-
-        return {
-            "message": "Analysis completed.",
-            "batch_id": batch_id,
-            "result": result
-        }
-
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="AI analyzer service has not been installed yet."
-        )
-    except Exception as error:
-        logger.exception("Analysis failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Analysis failed: {str(error)}"
-        )
+    if durable_queue_enabled():
+        try:
+            from worker import analyze_batch_task
+            set_batch_status(batch_id, "queued", queued_at=utc_now())
+            task = analyze_batch_task.delay(batch_id)
+            return {"batch_id": batch_id, "status": "queued", "task_id": task.id}
+        except Exception as error:
+            logger.exception("Unable to enqueue durable job")
+            set_batch_status(batch_id, "queue_failed", error=str(error))
+            raise HTTPException(status_code=503, detail="The durable worker queue is unavailable. Check REDIS_URL and worker health.")
+    else:
+        set_batch_status(batch_id, "queued", queued_at=utc_now(),
+                         warning="Local fallback: job can be interrupted by service restart.")
+        background_tasks.add_task(run_local_analysis, batch_id)
+        return {"batch_id": batch_id, "status": "queued",
+                "warning": "Local background mode is not restart-safe. Configure REDIS_URL and S3_BUCKET for durable processing."}
 
 
-# --------------------------------------------------
-# REVIEW ANALYSIS
-# --------------------------------------------------
+@app.get("/api/source/{batch_id}/{filename}/page/{page_number}")
+async def preview_source_page(batch_id: str, filename: str, page_number: int):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,180}\.pdf", filename, flags=re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="Invalid PDF filename.")
+    if page_number < 1 or page_number > 500:
+        raise HTTPException(status_code=400, detail="Page number must be between 1 and 500.")
+    import fitz
+    with tempfile.TemporaryDirectory(prefix="6ws-preview-") as temp_dir:
+        source_path = Path(temp_dir) / "source.pdf"
+        materialize_source_file(batch_id, filename, source_path)
+        try:
+            with fitz.open(source_path) as pdf:
+                if page_number > len(pdf):
+                    raise HTTPException(status_code=404, detail="PDF page does not exist.")
+                pix = pdf.load_page(page_number - 1).get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+                image_bytes = pix.tobytes("png")
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.exception("Unable to render source PDF page")
+            raise HTTPException(status_code=422, detail="Unable to render this PDF page.") from error
+    return Response(content=image_bytes, media_type="image/png",
+                    headers={"Cache-Control": "private, no-store"})
+
 
 @app.get("/api/results/{batch_id}")
-async def get_analysis_result(batch_id: str):
-    result_file = RESULT_DIR / f"{batch_id}.json"
+async def get_analysis_status(batch_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    result = get_result(batch_id)
+    if result:
+        return {"status": "completed", "result": result}
+    state = get_status(batch_id)
+    if state:
+        return state
+    if not get_manifest(batch_id):
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    return {"batch_id": batch_id, "status": "uploaded"}
 
-    if not result_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Analysis result not found."
-        )
 
-    return json.loads(result_file.read_text(encoding="utf-8"))
+@app.post("/api/assign-driver/{batch_id}")
+async def assign_document_driver(batch_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    current = get_result(batch_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Completed analysis result not found.")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Assignment payload must be valid JSON.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Assignment payload must be a JSON object.")
+    filename = payload.get("filename")
+    driver_name = payload.get("driver_name")
+    if not isinstance(filename, str) or not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="A valid source PDF filename is required.")
+    if not isinstance(driver_name, str) or not driver_name.strip() or len(driver_name.strip()) > 160:
+        raise HTTPException(status_code=400, detail="Enter a driver name (maximum 160 characters).")
+
+    document_analyses = current.get("document_analyses")
+    if not isinstance(document_analyses, list):
+        raise HTTPException(status_code=409, detail="This batch does not contain reassignment-ready document analysis data. Re-run analysis.")
+    target = next((item for item in document_analyses
+                   if item.get("source_filename") == filename), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="PDF is not part of this analyzed batch.")
+
+    clean_name = normalize_manual_driver_name(driver_name)
+    previous_driver = target.get("driver") or {}
+    if isinstance(previous_driver, dict):
+        target["original_driver"] = target.get("original_driver") or previous_driver
+        target["driver"] = {**previous_driver, "name": clean_name, "confidence": "manual"}
+    else:
+        target["original_driver"] = target.get("original_driver") or {"name": str(previous_driver)}
+        target["driver"] = {"name": clean_name, "confidence": "manual"}
+    target["driver_assignment_source"] = "manual"
+    target["driver_assignment_status"] = "pending_review"
+    for document in target.get("documents", []):
+        document["driver"] = target["driver"]
+        document["driver_assignment_source"] = "manual"
+
+    from services.ai_analyzer import assemble_batch_result
+    rebuilt = assemble_batch_result(
+        batch_id,
+        document_analyses,
+        current.get("extraction_errors", []),
+        current.get("documents_total", len(document_analyses))
+    )
+    rebuilt["completed_at"] = current.get("completed_at")
+    rebuilt["job_status"] = current.get("job_status", "completed")
+    rebuilt["approval_status"] = "pending_review"
+    rebuilt["overall_review_required"] = True
+    rebuilt["manual_assignment_history"] = current.get("manual_assignment_history", []) + [{
+        "filename": filename,
+        "previous_driver": (previous_driver.get("name") if isinstance(previous_driver, dict) else previous_driver),
+        "assigned_driver": clean_name,
+        "assigned_at": utc_now()
+    }]
+    save_result(batch_id, rebuilt)
+    set_batch_status(batch_id, "review_saved", manual_assignment_updated_at=utc_now())
+    return {"batch_id": batch_id, "status": "review_saved",
+            "approval_status": "pending_review", "message": f"{filename} assigned to {clean_name}. Review the regrouped records."}
 
 
-# --------------------------------------------------
-# APPROVE AND EXPORT
-# --------------------------------------------------
+def sync_review_edits_to_analysis(result: dict, sections: dict):
+    # The top-level rows are flattened from driver groups in the same order.
+    # Keep both representations aligned so a later manual driver reassignment
+    # cannot rebuild the batch from stale, pre-edit AI output.
+    drivers = result.get("drivers", []) or []
+    document_analyses = result.get("document_analyses", []) or []
+    for section, fields in sections.items():
+        rows = result.get(section, []) or []
+        nested_rows = [
+            row for driver in drivers for row in (driver.get(section, []) or [])
+        ]
+        for index, row in enumerate(rows):
+            if index < len(nested_rows):
+                for field in fields:
+                    if field in row:
+                        nested_rows[index][field] = row[field]
+
+        per_file_position = {}
+        for row in rows:
+            filename = row.get("source_filename")
+            if not filename:
+                continue
+            position = per_file_position.get(filename, 0)
+            source_analysis = next(
+                (item for item in document_analyses
+                 if item.get("source_filename") == filename),
+                None
+            )
+            if source_analysis is None:
+                continue
+            source_rows = source_analysis.get(section, []) or []
+            if position >= len(source_rows):
+                continue
+            source_row = source_rows[position]
+            for field in fields:
+                if field in row:
+                    source_row[field] = row[field]
+            per_file_position[filename] = position + 1
+
+
+@app.put("/api/review/{batch_id}")
+async def save_review(batch_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    current = get_result(batch_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Completed analysis result not found.")
+    try:
+        submitted = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Review payload must be valid JSON.")
+    if not isinstance(submitted, dict):
+        raise HTTPException(status_code=400, detail="Review payload must be a JSON object.")
+
+    allowed_fields = {
+        "trips": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "check_in_time_actual", "valid_time_circled",
+            "docking_time", "docking_date_or_check_out_date", "check_out_time",
+            "origin", "drop_offs", "destination", "with_backload",
+            "demurrage_availment", "remarks", "late", "segments"},
+        "toll_reimbursements": {"date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "rfid_toll_charges",
+            "entry_point", "exit_point", "date_of_or", "tag_number", "amount"},
+        "parking_reimbursements": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "vendor_name",
+            "address", "date_of_or", "tag_number", "amount"},
+        "passway_reimbursements": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "vendor_name",
+            "address", "date_of_or", "tag_number", "amount"}
+    }
+    for section, fields in allowed_fields.items():
+        existing_rows = current.get(section, [])
+        submitted_rows = submitted.get(section, existing_rows)
+        if not isinstance(submitted_rows, list) or len(submitted_rows) != len(existing_rows):
+            raise HTTPException(status_code=400, detail=f"Invalid row collection: {section}.")
+        for index, row in enumerate(submitted_rows):
+            if not isinstance(row, dict):
+                raise HTTPException(status_code=400, detail=f"Invalid row in {section}.")
+            for field in fields:
+                if field in row:
+                    value = row[field]
+                    if field == "drop_offs":
+                        if not isinstance(value, list) or not all(isinstance(part, str) for part in value):
+                            raise HTTPException(status_code=400, detail="drop_offs must be a list of text values.")
+                    elif field == "segments":
+                        if not isinstance(value, list) or not all(isinstance(segment, dict) for segment in value):
+                            raise HTTPException(status_code=400, detail="segments must be a list of movement objects.")
+                        existing_segments = current[section][index].get("segments", [])
+                        if len(value) != len(existing_segments):
+                            raise HTTPException(status_code=400, detail="Movement row count cannot be changed in review.")
+                        for segment_index, segment in enumerate(value):
+                            for segment_field in ("origin", "destination", "departure_time", "arrival_time"):
+                                segment_value = segment.get(segment_field)
+                                if segment_value is not None and not isinstance(segment_value, str):
+                                    raise HTTPException(status_code=400, detail=f"Invalid movement field: {segment_field}.")
+                                existing_segments[segment_index][segment_field] = segment_value
+                    elif value is not None and not isinstance(value, (str, int, float, bool)):
+                        raise HTTPException(status_code=400, detail=f"Invalid value for {field}.")
+                    current[section][index][field] = value
+
+    sync_review_edits_to_analysis(current, allowed_fields)
+    current["approval_status"] = "pending_review"
+    current["overall_review_required"] = True
+    current["review_saved_at"] = utc_now()
+    save_result(batch_id, current)
+    set_batch_status(batch_id, "review_saved", review_saved_at=current["review_saved_at"])
+    return {"batch_id": batch_id, "status": "review_saved",
+            "approval_status": "pending_review", "message": "Review edits saved. Export remains disabled."}
+
 
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str):
-    result_file = RESULT_DIR / f"{batch_id}.json"
+    raise HTTPException(status_code=501, detail="Export remains disabled until persistent human approval and duplicate-safe Google Sheets writes are implemented.")
 
-    if not result_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="No analysis result available for approval."
-        )
-
-    try:
-        result = json.loads(
-            result_file.read_text(encoding="utf-8")
-        )
-
-        # Implemented in services/google_sheets.py
-        from services.google_sheets import export_approved_batch
-
-        export_result = await export_approved_batch(
-            batch_id=batch_id,
-            result=result
-        )
-
-        return {
-            "message": "Approved batch exported.",
-            "batch_id": batch_id,
-            "export": export_result
-        }
-
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="Google Sheets service has not been installed yet."
-        )
-    except Exception as error:
-        logger.exception("Export failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Export failed: {str(error)}"
-        )
-
-
-# --------------------------------------------------
-# ROOT INFORMATION
-# --------------------------------------------------
 
 @app.get("/api")
 async def api_information():
     return {
-        "name": APP_NAME,
-        "version": APP_VERSION,
-        "workflow": [
-            "Upload driver PDFs",
-            "Group documents by driver",
-            "Extract PDF text and scanned pages",
-            "Analyze trips and reimbursements",
-            "Review extracted information",
-            "Approve results",
-            "Export to Google Sheets"
-        ]
+        "name": APP_NAME, "version": APP_VERSION,
+        "workflow": ["Upload PDF documents", "Persist files and batch manifest",
+                     "Queue analysis to worker when configured", "Analyze documents independently",
+                     "Review all extracted records", "Export only after verified approval"]
     }
-
-
-# --------------------------------------------------
-# STARTUP
-# --------------------------------------------------
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("%s started successfully.", APP_NAME)

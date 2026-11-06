@@ -1,0 +1,44 @@
+name: Backend checks
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: 6ws-backend-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install application dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: Compile Python modules
+        run: python -m compileall -q app.py worker.py services
+      - name: Check dashboard JavaScript syntax
+        run: node --check static/app.js
+      - name: Build Docker image
+        run: docker build --tag 6ws-trip-encoder:ci .
+      - name: Smoke-test container health endpoint
+        run: |
+          docker run --detach --rm --name 6ws-ci -p 10000:10000 -e APP_USERNAME=ci -e APP_PASSWORD=ci-secret -e GEMINI_API_KEY=ci-placeholder 6ws-trip-encoder:ci
+          trap 'docker stop 6ws-ci >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:10000/health; then
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' 6ws-ci)" != "true" ]; then
+              docker logs 6ws-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          docker logs 6ws-ci
+          exit 1
+      - name: Run processor unit tests
+        run: python -m unittest discover -s tests -v
