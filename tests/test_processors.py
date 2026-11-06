@@ -34,6 +34,26 @@ class TripRuleTests(unittest.TestCase):
     def test_soc_to_mfm_is_outbound(self):
         self.assertEqual(determine_movement_type("SOC 6", "MFM Pulilan"), "outbound")
 
+    def test_model_cannot_override_soc_to_mfm_outbound_rule(self):
+        trip = process_trip({"segments": [{
+            "origin": "SOC 6",
+            "destination": "MFM Pulilan",
+            "movement_type": "backload",
+        }]})
+        self.assertEqual(trip["segments"][0]["movement_type"], "outbound")
+
+    def test_model_cannot_mark_non_mfm_leg_as_backload(self):
+        trip = process_trip({"segments": [{
+            "origin": "Dasol Hub",
+            "destination": "Bolinao Hub",
+            "movement_type": "backload",
+        }]})
+        self.assertEqual(trip["segments"][0]["movement_type"], "intermediate")
+
+    def test_same_soc_parking_leg_is_parking(self):
+        self.assertEqual(determine_movement_type("SOC 6", "SOC 6 PARKING"), "parking")
+
+
     def test_non_soc_to_mfm_is_backload(self):
         self.assertEqual(determine_movement_type("Dasol Hub", "MFM Pulilan"), "backload")
 
