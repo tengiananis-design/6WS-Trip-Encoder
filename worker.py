@@ -49,3 +49,4 @@ def analyze_batch_task(batch_id):
                          {"batch_id": batch_id, "status": "failed", "error": str(error)})
         # Do not automatically restart the entire batch: that would repeat already-billed AI calls.
         # Individual page-window requests have their own bounded retry policy.
+        raise
