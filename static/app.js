@@ -126,6 +126,10 @@ function renderAnalysis(result) {
     tolls.forEach(x=>{html+=`<div class="result-item"><p>Driver: ${escapeHTML(x.driver_name||"Unassigned")}</p><p>Date: ${escapeHTML(x.date)}</p><p>Location: ${escapeHTML(x.location)}</p><p>Amount: ${escapeHTML(x.amount)}</p><p>Flags: ${escapeHTML((x.review_flags||[]).join("; "))}</p></div>`;});
     html+='</div><div class="result-section"><h3>Parking Reimbursements ('+parking.length+')</h3>';
     parking.forEach(x=>{html+=`<div class="result-item"><p>Date: ${escapeHTML(x.date)}</p><p>Location: ${escapeHTML(x.location)}</p><p>Amount: ${escapeHTML(x.amount)}</p><p>Flags: ${escapeHTML((x.review_flags||[]).join("; "))}</p></div>`;});
+    if(result.partial_export){
+        const partial=result.partial_export;
+        html+=`</div><div class="result-section"><h3>Export reconciliation required</h3><div class="result-item"><p><strong>Automatic retry blocked.</strong> Check the spreadsheet before attempting any manual correction.</p><p>Failed sheet: ${escapeHTML(partial.failed_sheet||"Unknown")}</p><p>Sheets that may already contain rows: ${escapeHTML((partial.completed_exports||[]).map(x=>x.sheet+" ("+x.rows_added+" rows)").join(", ")||"None confirmed")}</p><p>Error: ${escapeHTML(result.export_error||"Unknown export error")}</p></div></div>`;
+    }
     html+='</div><div class="result-section"><h3>Unresolved Items</h3><div class="result-item">'+escapeHTML((result.unresolved_items||[]).map(x=>typeof x==="string"?x:JSON.stringify(x)).join("; ")||"None reported.")+'</div></div>';
     const batchId = result.batch_id || "";
     html += `</div><div class="result-section"><h3>Human Review Editor</h3>
