@@ -214,6 +214,59 @@ def _run_analysis_job(batch_id: str, batch_dir: Path):
                   finished_at=datetime.now(timezone.utc).isoformat())
 
 
+@app.put("/api/assignments/{batch_id}")
+async def save_driver_assignments(batch_id: str, request: Request):
+    from services import storage
+    from services.driver_grouping import normalize_driver_name
+
+    batch_id = safe_batch_id(batch_id)
+    batch_dir = UPLOAD_DIR / batch_id
+    manifest_key = f"uploads/{batch_id}/batch.json"
+    manifest_file = batch_dir / "batch.json"
+
+    if storage.shared_storage_enabled() and storage.exists(manifest_key):
+        manifest = storage.load_json(manifest_key)
+    elif manifest_file.is_file():
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    else:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    result_key = f"results/{batch_id}.json"
+    if (RESULT_DIR / f"{batch_id}.json").is_file() or (storage.shared_storage_enabled() and storage.exists(result_key)):
+        raise HTTPException(status_code=409, detail="This batch has already been analyzed. Manual assignments must be saved before analysis.")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="An assignments object is required.")
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, dict):
+        raise HTTPException(status_code=400, detail="assignments must be a filename-to-driver-name object.")
+
+    allowed_files = {item.get("filename") for item in manifest.get("documents", [])}
+    normalized = {}
+    for filename, driver_name in assignments.items():
+        if filename not in allowed_files:
+            raise HTTPException(status_code=400, detail=f"Unknown uploaded filename: {filename}")
+        name = normalize_driver_name(driver_name)
+        if not name:
+            raise HTTPException(status_code=400, detail=f"A driver name is required for {filename}.")
+        normalized[filename] = name
+
+    manifest["manual_assignments"] = normalized
+    if storage.shared_storage_enabled():
+        storage.save_json(manifest_key, manifest)
+    if batch_dir.is_dir():
+        manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return {
+        "message": "Manual driver assignments saved. They will be applied during analysis.",
+        "batch_id": batch_id,
+        "assignment_count": len(normalized),
+        "assignments": normalized
+    }
+
+
 @app.post("/api/analyze/{batch_id}")
 async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     from services.approval_lock import approval_lock
