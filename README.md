@@ -11,8 +11,9 @@ AI-assisted PDF Trip Ticket and Reimbursement Encoder.
 - Identify and group documents by driver.
 - Process trip ticket information.
 - Separate toll, parking, and passway reimbursements.
-- Review extracted information before approval.
-- Export approved results to Google Sheets.
+- Review and correct extracted records, movement segments, and source PDF pages.
+- Manually assign unidentified PDFs to a driver.
+- Export is disabled until duplicate-safe TENGS mapping and persistent approval are implemented.
 
 ## Technology
 
@@ -30,6 +31,7 @@ AI-assisted PDF Trip Ticket and Reimbursement Encoder.
 ```text
 6ws-trip-encoder/
 ├── app.py
+├── worker.py
 ├── requirements.txt
 ├── Dockerfile
 ├── render.yaml
@@ -37,6 +39,7 @@ AI-assisted PDF Trip Ticket and Reimbursement Encoder.
 ├── .gitignore
 ├── README.md
 ├── services/
+├── tests/
 ├── templates/
 ├── static/
 ├── data/
@@ -54,7 +57,7 @@ pip install -r requirements.txt
 ```
 
 4. Copy `.env.example` to `.env`.
-5. Add your credentials.
+5. Set `APP_USERNAME`, `APP_PASSWORD`, and `GEMINI_API_KEY` in `.env`.
 6. Start the application:
 
 ```bash
@@ -78,9 +81,11 @@ http://127.0.0.1:8000
 
 ## Required Environment Variables
 
+- `APP_USERNAME`
+- `APP_PASSWORD`
 - `GEMINI_API_KEY`
-- `GOOGLE_SHEETS_ID`
-- `GOOGLE_SERVICE_ACCOUNT_JSON`
+
+Optional Gemini tuning: `GEMINI_REQUEST_DELAY_SECONDS`, `GEMINI_MAX_ATTEMPTS`, `GEMINI_MAX_PAGES_PER_REQUEST`, and `GEMINI_PAGE_OVERLAP`.
 
 Never commit API keys, service-account credentials, or private driver documents to GitHub.
 
@@ -124,6 +129,8 @@ node --check static/app.js
 python -m unittest discover -s tests -v
 ```
 
-For the first end-to-end test, configure `APP_USERNAME`, `APP_PASSWORD`, and `GEMINI_API_KEY`. Upload a small representative set first: one trip ticket, one toll PDF, and one parking PDF, including at least one driver whose name is not readable so manual assignment can be exercised. Verify every extracted row against the displayed source page. Do not enable production export; it remains disabled.
+The dashboard accepts up to 200 PDFs per batch, 50 MB per PDF, and 1 GB total per batch. It rejects duplicate sanitized filenames safely. AI analysis is sequential; long PDFs are split into overlapping page windows. Transient AI request failures receive bounded retries, and progress is reported per PDF. The worker does not automatically replay an entire failed batch, to avoid repeating already-billed AI requests.
 
-For 100+ PDFs, do not use the local background fallback. Configure and verify the private object bucket and Redis queue on both web and worker services first. The current pipeline still processes PDFs sequentially and makes one Gemini request per PDF, so the large-batch load/quota test remains a separate gate.
+For the first end-to-end test, configure `APP_USERNAME`, `APP_PASSWORD`, and `GEMINI_API_KEY`. Upload a small representative set first: one trip ticket, one toll PDF, one parking/passway PDF, and at least one unidentified-driver PDF. Verify every extracted row against the displayed source page. Do not enable production export; it remains disabled.
+
+For 100+ PDFs, do not use the local background fallback. Configure and verify the private object bucket and Redis queue on both web and worker services first. The current pipeline still processes PDFs sequentially. A short PDF uses one Gemini request; longer PDFs use one request per page window. Large-batch load, timeout, worker-recovery, and Gemini quota tests remain separate gates.
