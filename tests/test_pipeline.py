@@ -65,6 +65,18 @@ class PipelineValidationTests(unittest.TestCase):
 
         self.assertTrue(validated["overall_review_required"])
 
+    def test_group_without_driver_name_cannot_be_approved_even_if_confidence_says_high(self):
+        result = {
+            "driver": {"name": None, "confidence": "unknown"},
+            "driver_groups": [{"driver": {"name": None, "confidence": "high"}, "documents": []}],
+            "trips": [],
+            "toll_reimbursements": [],
+            "parking_reimbursements": [],
+            "unresolved_items": [],
+        }
+        validated = validate_analysis_result(result)
+        self.assertTrue(validated["overall_review_required"])
+
 
 if __name__ == "__main__":
     unittest.main()
