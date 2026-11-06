@@ -99,6 +99,16 @@ class ReimbursementTests(unittest.TestCase):
         expense = normalize_expense({"date": None, "location": "NLEX", "amount": None}, "TOLL")
         self.assertEqual(expense["status"], "review_required")
 
+    def test_reimbursement_source_references_are_preserved(self):
+        reference = {"filename": "toll.pdf", "page_number": 2, "fact": "Toll amount"}
+        expense = normalize_expense({
+            "date": "2026-11-06",
+            "location": "NLEX",
+            "amount": "120",
+            "source_references": [reference],
+        }, "TOLL")
+        self.assertEqual(expense["source_references"], [reference])
+
 
 if __name__ == "__main__":
     unittest.main()
