@@ -297,6 +297,22 @@ def merge_page_window_analyses(analyses: list[dict], filename: str,
     return merged
 
 
+async def analyze_documents_with_retry(documents: list[dict], attempts: int = 3) -> dict:
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return await asyncio.to_thread(analyze_documents, documents)
+        except Exception as error:
+            last_error = error
+            if attempt + 1 >= attempts:
+                break
+            delay = min(2 ** (attempt + 1), 8)
+            logger.warning("AI request failed (attempt %s/%s); retrying in %ss: %s",
+                           attempt + 1, attempts, delay, error)
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"AI analysis failed after {attempts} attempts: {last_error}") from last_error
+
+
 def _driver_name(result: dict) -> str:
     driver = result.get("driver") or {}
     return driver.get("name") if isinstance(driver, dict) else str(driver or "")
@@ -422,7 +438,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                     "page_window_count": len(windows),
                     "pages": page_window
                 }]
-                window_analyses.append(await asyncio.to_thread(analyze_documents, prompt_doc))
+                window_analyses.append(await analyze_documents_with_retry(prompt_doc))
             analysis = merge_page_window_analyses(
                 window_analyses, pdf_path.name, len(pages)
             )
