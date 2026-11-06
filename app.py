@@ -146,6 +146,12 @@ async def upload_documents(files: list[UploadFile] = File(...)):
         (batch_dir / "batch.json").write_text(json.dumps(batch_info, indent=2), encoding="utf-8")
         return {"message": "Documents uploaded successfully.", **batch_info}
     except Exception:
+        try:
+            from services import storage
+            if storage.shared_storage_enabled():
+                storage.delete_prefix(f"uploads/{batch_id}")
+        except Exception:
+            logger.exception("Could not clean up partially uploaded shared batch %s", batch_id)
         for item in batch_dir.iterdir():
             if item.is_file():
                 item.unlink(missing_ok=True)
