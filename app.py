@@ -197,7 +197,9 @@ def _run_analysis_job(batch_id: str, batch_dir: Path):
             write_job(batch_dir, status="processing", stage="analyzing_documents",
                       completed_documents=done, total_documents=total,
                       current_filename=filename)
-        result = asyncio.run(analyze_batch_documents(batch_dir, progress_callback=progress))
+        manifest = json.loads((batch_dir / "batch.json").read_text(encoding="utf-8"))
+        manual_assignments = manifest.get("manual_assignments", {})
+        result = asyncio.run(analyze_batch_documents(batch_dir, progress_callback=progress, manual_assignments=manual_assignments))
         result = validate_analysis_result(result)
         result["batch_id"] = batch_id
         result["approval_status"] = "pending_review"
