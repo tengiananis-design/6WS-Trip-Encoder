@@ -1,7 +1,9 @@
-
+import asyncio
 import json
 import os
 import logging
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,8 @@ SERVICE_ACCOUNT_SETTING = (
 TRIP_SHEET_NAME = os.getenv("TRIP_SHEET_NAME", "Trip Encoding")
 TOLL_SHEET_NAME = os.getenv("TOLL_SHEET_NAME", "Toll Reimbursements")
 PARKING_SHEET_NAME = os.getenv("PARKING_SHEET_NAME", "Parking Reimbursements")
+EXPORT_LEDGER_SHEET = os.getenv("EXPORT_LEDGER_SHEET", "_6WS Export Ledger")
+_export_lock = threading.Lock()
 
 
 def get_sheets_service():
@@ -47,22 +51,6 @@ def get_sheets_service():
         credentials = service_account.Credentials.from_service_account_file(str(credential_path), scopes=SCOPES)
 
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
-
-
-def append_rows(service, sheet_name: str, rows: list[list[Any]]) -> dict:
-    if not rows:
-        return {"sheet": sheet_name, "rows_added": 0}
-    result = service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"'{sheet_name}'!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows}
-    ).execute()
-    return {
-        "sheet": sheet_name,
-        "rows_added": result.get("updates", {}).get("updatedRows", 0)
-    }
 
 
 def prepare_trip_rows(result: dict) -> list[list[Any]]:
@@ -103,19 +91,127 @@ def prepare_reimbursement_rows(records: list[dict], driver_name: str) -> list[li
     ]
 
 
-async def export_approved_batch(batch_id: str, result: dict) -> dict:
+def _cell_data(value: Any) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, bool):
+        return {"userEnteredValue": {"boolValue": value}}
+    if isinstance(value, (int, float)):
+        return {"userEnteredValue": {"numberValue": value}}
+    return {"userEnteredValue": {"stringValue": str(value)}}
+
+
+def _append_cells_request(sheet_id: int, rows: list[list[Any]]) -> dict | None:
+    if not rows:
+        return None
+    return {
+        "appendCells": {
+            "sheetId": sheet_id,
+            "rows": [{"values": [_cell_data(value) for value in row]} for row in rows],
+            "fields": "userEnteredValue"
+        }
+    }
+
+
+def _sheet_ids(service) -> dict[str, int]:
+    metadata = service.spreadsheets().get(
+        spreadsheetId=SPREADSHEET_ID,
+        fields="sheets(properties(sheetId,title))"
+    ).execute()
+    return {
+        sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+        for sheet in metadata.get("sheets", [])
+    }
+
+
+def _ensure_ledger_sheet(service, sheet_ids: dict[str, int]) -> dict[str, int]:
+    if EXPORT_LEDGER_SHEET not in sheet_ids:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": EXPORT_LEDGER_SHEET}}}]}
+        ).execute()
+        sheet_ids = _sheet_ids(service)
+    return sheet_ids
+
+
+def _existing_export(service, batch_id: str) -> bool:
+    response = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{EXPORT_LEDGER_SHEET}'!A:A"
+    ).execute()
+    return any(
+        row and str(row[0]).strip() == batch_id
+        for row in response.get("values", [])
+    )
+
+
+def _export_approved_batch_sync(batch_id: str, result: dict) -> dict:
     if result.get("approval_status") != "approved":
         raise ValueError("Batch must be approved before export.")
 
-    service = get_sheets_service()
-    driver_name = result.get("driver", {}).get("name") or "UNKNOWN"
-    exports = []
-    try:
-        exports.append(append_rows(service, TRIP_SHEET_NAME, prepare_trip_rows(result)))
-        exports.append(append_rows(service, TOLL_SHEET_NAME, prepare_reimbursement_rows(result.get("toll_reimbursements", []), driver_name)))
-        exports.append(append_rows(service, PARKING_SHEET_NAME, prepare_reimbursement_rows(result.get("parking_reimbursements", []), driver_name)))
-    except HttpError:
-        logger.exception("Google Sheets export failed for batch %s", batch_id)
-        raise
+    with _export_lock:
+        service = get_sheets_service()
+        sheet_ids = _ensure_ledger_sheet(service, _sheet_ids(service))
+        required = [TRIP_SHEET_NAME, TOLL_SHEET_NAME, PARKING_SHEET_NAME]
+        missing = [name for name in required if name not in sheet_ids]
+        if missing:
+            raise RuntimeError("Google Sheets is missing required tab(s): " + ", ".join(missing))
 
-    return {"batch_id": batch_id, "driver": driver_name, "exports": exports, "status": "exported"}
+        if _existing_export(service, batch_id):
+            return {
+                "batch_id": batch_id,
+                "status": "already_exported",
+                "message": "This batch ID is already recorded in the export ledger; no rows were added."
+            }
+
+        driver_name = result.get("driver", {}).get("name") or "UNKNOWN"
+        trip_rows = prepare_trip_rows(result)
+        toll_rows = prepare_reimbursement_rows(result.get("toll_reimbursements", []), driver_name)
+        parking_rows = prepare_reimbursement_rows(result.get("parking_reimbursements", []), driver_name)
+        counts = {
+            TRIP_SHEET_NAME: len(trip_rows),
+            TOLL_SHEET_NAME: len(toll_rows),
+            PARKING_SHEET_NAME: len(parking_rows)
+        }
+        ledger_row = [[
+            batch_id,
+            datetime.now(timezone.utc).isoformat(),
+            driver_name,
+            counts[TRIP_SHEET_NAME],
+            counts[TOLL_SHEET_NAME],
+            counts[PARKING_SHEET_NAME],
+            "EXPORTED"
+        ]]
+
+        # All three output tabs and the ledger are written in one atomic Sheets
+        # batchUpdate. A retry sees the ledger entry and cannot append twice.
+        requests = [
+            request for request in (
+                _append_cells_request(sheet_ids[TRIP_SHEET_NAME], trip_rows),
+                _append_cells_request(sheet_ids[TOLL_SHEET_NAME], toll_rows),
+                _append_cells_request(sheet_ids[PARKING_SHEET_NAME], parking_rows),
+                _append_cells_request(sheet_ids[EXPORT_LEDGER_SHEET], ledger_row)
+            ) if request
+        ]
+        try:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"requests": requests}
+            ).execute()
+        except HttpError:
+            logger.exception("Atomic Google Sheets export failed for batch %s", batch_id)
+            raise
+
+        return {
+            "batch_id": batch_id,
+            "driver": driver_name,
+            "exports": [
+                {"sheet": name, "rows_added": counts[name]}
+                for name in required
+            ],
+            "status": "exported"
+        }
+
+
+async def export_approved_batch(batch_id: str, result: dict) -> dict:
+    return await asyncio.to_thread(_export_approved_batch_sync, batch_id, result)
