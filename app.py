@@ -184,6 +184,41 @@ async def get_analysis_result(batch_id: str):
         raise HTTPException(status_code=500, detail="Stored analysis result is invalid JSON.")
 
 
+@app.put("/api/review/{batch_id}")
+async def save_reviewed_result(batch_id: str, request: Request):
+    batch_id = safe_batch_id(batch_id)
+    result_file = RESULT_DIR / f"{batch_id}.json"
+    if not result_file.is_file():
+        raise HTTPException(status_code=404, detail="Analysis result not found.")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="A reviewed JSON result is required.")
+    reviewed = payload.get("result")
+    if not isinstance(reviewed, dict):
+        raise HTTPException(status_code=400, detail="The result field must be a JSON object.")
+    for field in ("driver_groups", "documents", "trips", "toll_reimbursements", "parking_reimbursements", "unresolved_items"):
+        if field in reviewed and not isinstance(reviewed[field], list):
+            raise HTTPException(status_code=400, detail=f"{field} must be a list.")
+    if not isinstance(reviewed.get("driver"), dict):
+        raise HTTPException(status_code=400, detail="driver must be an object.")
+    reviewed["batch_id"] = batch_id
+    reviewed["approval_status"] = "pending_review"
+    reviewed["review_saved_at"] = datetime.now(timezone.utc).isoformat()
+    # A reviewer can clear flags only by explicitly replacing unresolved_items
+    # with an empty list after inspecting and correcting the records.
+    reviewed["overall_review_required"] = bool(
+        reviewed.get("unresolved_items")
+        or reviewed.get("extraction_errors")
+        or not (reviewed.get("driver_groups") or reviewed.get("driver", {}).get("name"))
+    )
+    temp_file = result_file.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(reviewed, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp_file.replace(result_file)
+    return {"message": "Reviewed result saved. It remains unapproved until separately approved.", "batch_id": batch_id, "overall_review_required": reviewed["overall_review_required"]}
+
+
+
 @app.post("/api/approve/{batch_id}")
 async def approve_batch(batch_id: str, request: Request):
     batch_id = safe_batch_id(batch_id)
