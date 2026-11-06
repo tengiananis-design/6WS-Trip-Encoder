@@ -211,6 +211,10 @@ async def save_reviewed_result(batch_id: str, request: Request):
         reviewed.get("unresolved_items")
         or reviewed.get("extraction_errors")
         or not (reviewed.get("driver_groups") or reviewed.get("driver", {}).get("name"))
+        or any(
+            group.get("driver", {}).get("confidence") not in ("high", "verified")
+            for group in reviewed.get("driver_groups", [])
+        )
     )
     temp_file = result_file.with_suffix(".tmp")
     temp_file.write_text(json.dumps(reviewed, indent=2, ensure_ascii=False), encoding="utf-8")
