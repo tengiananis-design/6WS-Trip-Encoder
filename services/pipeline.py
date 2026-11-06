@@ -1,4 +1,3 @@
-from services.driver_grouping import group_documents_by_driver
 from services.trip_processor import process_all_trips
 from services.reimbursement_processor import process_reimbursements
 
@@ -32,8 +31,17 @@ def validate_analysis_result(result: dict) -> dict:
     result["overall_review_required"] = bool(
         result["unresolved_items"]
         or result.get("extraction_errors")
-        or not result["driver"].get("name")
-        or result["driver"].get("confidence") not in ("high", "verified")
+        or (
+            not result.get("driver_groups")
+            and (
+                not result["driver"].get("name")
+                or result["driver"].get("confidence") not in ("high", "verified")
+            )
+        )
+        or any(
+            group.get("driver", {}).get("confidence") not in ("high", "verified")
+            for group in result.get("driver_groups", [])
+        )
     )
     result["approval_status"] = "pending_review"
     return result
