@@ -205,12 +205,23 @@ async def save_reviewed_result(batch_id: str, request: Request):
     reviewed["batch_id"] = batch_id
     reviewed["approval_status"] = "pending_review"
     reviewed["review_saved_at"] = datetime.now(timezone.utc).isoformat()
-    # A reviewer can clear flags only by explicitly replacing unresolved_items
-    # with an empty list after inspecting and correcting the records.
+    # Nested record flags must also be resolved; clearing only the summary
+    # list must never make a flagged trip or receipt exportable.
+    nested_flags = []
+    for trip in reviewed.get("trips", []):
+        nested_flags.extend(trip.get("review_flags", []))
+    for collection in ("toll_reimbursements", "parking_reimbursements"):
+        for expense in reviewed.get(collection, []):
+            nested_flags.extend(expense.get("review_flags", []))
     reviewed["overall_review_required"] = bool(
         reviewed.get("unresolved_items")
+        or nested_flags
         or reviewed.get("extraction_errors")
         or not (reviewed.get("driver_groups") or reviewed.get("driver", {}).get("name"))
+        or (
+            not reviewed.get("driver_groups")
+            and reviewed.get("driver", {}).get("confidence") not in ("high", "verified")
+        )
         or any(
             group.get("driver", {}).get("confidence") not in ("high", "verified")
             for group in reviewed.get("driver_groups", [])
