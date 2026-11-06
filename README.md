@@ -89,3 +89,27 @@ Never commit API keys, service-account credentials, or private driver documents 
 This starter project requires configuration and testing before production use.
 
 Always review extracted trip and reimbursement data before approving any Google Sheets export.
+
+
+## Batch processing and job monitoring
+
+The analysis endpoint now queues work through FastAPI background tasks:
+
+- `POST /api/analyze/{batch_id}` starts analysis and returns a job record.
+- `GET /api/jobs/{batch_id}` reports queued, processing, completed, or failed status.
+- The dashboard polls the job endpoint and displays per-PDF progress.
+- Each PDF is extracted and analyzed separately before grouping by the driver's extracted name. Unidentified or conflicting driver identities remain in review.
+
+### Important operational limitation
+
+This first background-job implementation is process-local, not a durable distributed queue. A restart, redeploy, or instance sleep can interrupt an active batch. Job status and uploaded PDFs are stored under `DATA_DIR`, which defaults to the application's local `data` directory. Local container storage is not durable across Render redeploys or instance replacement.
+
+Before using this with real 100+ PDF batches, configure durable storage and move processing to a dedicated worker/queue with persistent job state. If using a mounted persistent disk, set `DATA_DIR` to its mount path. Do not assume the current free web-service filesystem is persistent.
+
+### Batch sizing
+
+The upload endpoint streams each file to disk and currently enforces a 100 MB per-PDF limit. It does not yet provide resumable/chunked uploads, so very large combined upload requests should be tested against the hosting provider's request limits before relying on them.
+
+### Verification status
+
+The GitHub Actions unit-test workflow is configured for the development branch. A successful workflow run and end-to-end test with representative trip tickets, toll receipts, and parking receipts are still required before production use.
