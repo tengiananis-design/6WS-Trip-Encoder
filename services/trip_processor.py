@@ -148,12 +148,23 @@ def process_trip(trip: dict) -> dict:
         trip.get("review_flags", [])
     )
 
+    if not trip.get("trip_date"):
+        review_flags.append("Trip date is missing.")
+    if not trip.get("line_haul_trip_number"):
+        review_flags.append("Line Haul Trip No. is missing.")
+    if not trip.get("source_references"):
+        review_flags.append("Trip source PDF/page references are missing.")
+
     if not processed_segments:
         review_flags.append(
             "No movement segments were identified."
         )
 
     for segment in processed_segments:
+        if not segment.get("source_references"):
+            review_flags.append(
+                f"Segment {segment['sequence']} has no source PDF/page reference."
+            )
         if segment["review_required"]:
             review_flags.append(
                 f"Segment {segment['sequence']} needs review."
