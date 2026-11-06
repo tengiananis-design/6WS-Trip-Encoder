@@ -129,6 +129,14 @@ async def run_local_analysis(batch_id):
         set_batch_status(batch_id, "failed", error=str(error))
 
 
+def save_result(batch_id, result):
+    storage = durable_storage()
+    if storage:
+        storage.put_json(f"batches/{batch_id}/result.json", result)
+    else:
+        atomic_json(RESULT_DIR / f"{batch_id}.json", result)
+
+
 @app.get("/health")
 async def health():
     return {"application": APP_NAME, "version": APP_VERSION, "status": "online", "timestamp": utc_now()}
@@ -311,6 +319,63 @@ async def get_analysis_status(batch_id: str):
     if not get_manifest(batch_id):
         raise HTTPException(status_code=404, detail="Batch not found.")
     return {"batch_id": batch_id, "status": "uploaded"}
+
+
+@app.put("/api/review/{batch_id}")
+async def save_review(batch_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    current = get_result(batch_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Completed analysis result not found.")
+    try:
+        submitted = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Review payload must be valid JSON.")
+    if not isinstance(submitted, dict):
+        raise HTTPException(status_code=400, detail="Review payload must be a JSON object.")
+
+    allowed_fields = {
+        "trips": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "check_in_time_actual", "valid_time_circled",
+            "docking_time", "docking_date_or_check_out_date", "check_out_time",
+            "origin", "drop_offs", "destination", "with_backload",
+            "demurrage_availment", "remarks", "late"},
+        "toll_reimbursements": {"date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "rfid_toll_charges",
+            "entry_point", "exit_point", "date_of_or", "tag_number", "amount"},
+        "parking_reimbursements": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "vendor_name",
+            "address", "date_of_or", "tag_number", "amount"},
+        "passway_reimbursements": {"trip_date", "line_haul_trip_number", "driver_id", "driver_name",
+            "plate_no", "fleet_type", "origin", "destination", "vendor_name",
+            "address", "date_of_or", "tag_number", "amount"}
+    }
+    for section, fields in allowed_fields.items():
+        existing_rows = current.get(section, [])
+        submitted_rows = submitted.get(section, existing_rows)
+        if not isinstance(submitted_rows, list) or len(submitted_rows) != len(existing_rows):
+            raise HTTPException(status_code=400, detail=f"Invalid row collection: {section}.")
+        for index, row in enumerate(submitted_rows):
+            if not isinstance(row, dict):
+                raise HTTPException(status_code=400, detail=f"Invalid row in {section}.")
+            for field in fields:
+                if field in row:
+                    value = row[field]
+                    if field == "drop_offs":
+                        if not isinstance(value, list):
+                            raise HTTPException(status_code=400, detail="drop_offs must be a list.")
+                    elif value is not None and not isinstance(value, (str, int, float, bool)):
+                        raise HTTPException(status_code=400, detail=f"Invalid value for {field}.")
+                    current[section][index][field] = value
+
+    current["approval_status"] = "pending_review"
+    current["overall_review_required"] = True
+    current["review_saved_at"] = utc_now()
+    save_result(batch_id, current)
+    set_batch_status(batch_id, "review_saved", review_saved_at=current["review_saved_at"])
+    return {"batch_id": batch_id, "status": "review_saved",
+            "approval_status": "pending_review", "message": "Review edits saved. Export remains disabled."}
 
 
 @app.post("/api/approve/{batch_id}")

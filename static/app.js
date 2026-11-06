@@ -369,160 +369,165 @@ async function pollAnalysis(batchId) {
 }
 
 // --------------------------------------------------
-// DISPLAY ANALYSIS
+// DISPLAY AND EDIT ANALYSIS
 // --------------------------------------------------
 
-async function loadResults(batchId) {
-    const state = await apiRequest(`/api/results/${encodeURIComponent(batchId)}`);
-    if (state.status === "completed" && state.result) renderAnalysis(state.result);
-    else if (["failed", "queue_failed"].includes(state.status)) {
-        analysisResults.innerHTML = `<div class="result-item"><h3>Analysis ${escapeHTML(state.status)}</h3><p>${escapeHTML(state.error || "The worker could not complete this batch.")}</p></div>`;
-    } else {
-        await pollAnalysis(batchId);
+let activeReviewBatchId = null;
+let activeReviewResult = null;
+
+const reviewSections = [
+    {key:"trips", title:"Trip Records", fields:[
+        ["trip_date","Trip date"],["line_haul_trip_number","Linehaul trip no."],
+        ["driver_id","Driver ID"],["driver_name","Driver name"],["plate_no","Plate no."],
+        ["fleet_type","Fleet type"],["check_in_time_actual","Check-in time"],
+        ["valid_time_circled","Valid time (circled)"],["docking_time","Docking time"],
+        ["docking_date_or_check_out_date","Docking / check-out date"],
+        ["check_out_time","Check-out time"],["origin","Origin"],["drop_offs","Drop-offs"],
+        ["destination","Destination"],["with_backload","With backload"],
+        ["demurrage_availment","Demurrage"],["remarks","Remarks"],["late","Late"]
+    ]},
+    {key:"toll_reimbursements", title:"Toll Reimbursements", fields:[
+        ["date","Date"],["line_haul_trip_number","Linehaul trip no."],
+        ["driver_id","Driver ID"],["driver_name","Driver name"],["plate_no","Plate no."],
+        ["fleet_type","Fleet type"],["origin","Origin"],["destination","Destination"],
+        ["rfid_toll_charges","RFID / provider"],["entry_point","Entry point"],
+        ["exit_point","Exit point"],["date_of_or","Date of OR"],["tag_number","Tag number"],["amount","Amount"]
+    ]},
+    {key:"parking_reimbursements", title:"Parking Reimbursements", fields:[
+        ["trip_date","Trip date"],["line_haul_trip_number","Linehaul trip no."],
+        ["driver_id","Driver ID"],["driver_name","Driver name"],["plate_no","Plate no."],
+        ["fleet_type","Fleet type"],["origin","Origin"],["destination","Destination"],
+        ["vendor_name","Vendor"],["address","Address"],["date_of_or","Date of OR"],
+        ["tag_number","Tag number"],["amount","Amount"]
+    ]},
+    {key:"passway_reimbursements", title:"Passway Reimbursements", fields:[
+        ["trip_date","Trip date"],["line_haul_trip_number","Linehaul trip no."],
+        ["driver_id","Driver ID"],["driver_name","Driver name"],["plate_no","Plate no."],
+        ["fleet_type","Fleet type"],["origin","Origin"],["destination","Destination"],
+        ["vendor_name","Vendor"],["address","Address"],["date_of_or","Date of OR"],
+        ["tag_number","Tag number"],["amount","Amount"]
+    ]}
+];
+
+function renderAnalysis(result, batchId) {
+    activeReviewBatchId = batchId || result.batch_id || null;
+    activeReviewResult = JSON.parse(JSON.stringify(result));
+    const drivers = (result.drivers || []).map(group => {
+        const driver = group.driver;
+        return typeof driver === "object" ? (driver.name || "Unidentified") : (driver || "Unidentified");
+    });
+    let html = '<div class="result-item"><h3>Analysis overview</h3>' +
+        '<p><strong>Batch:</strong> ' + escapeHTML(activeReviewBatchId || "Unknown") + '</p>' +
+        '<p><strong>Documents processed:</strong> ' + Number(result.documents_processed || 0) +
+        ' / ' + Number(result.documents_total || 0) + '</p>' +
+        '<p><strong>Drivers identified:</strong> ' + Number(result.driver_count || 0) + '</p>' +
+        '<p><strong>Drivers:</strong> ' + escapeHTML(drivers.join(", ") || "Unidentified") + '</p>' +
+        '<p><strong>Approval:</strong> Pending human review. Export is disabled.</p>' +
+        '<p><strong>Unidentified documents:</strong> ' +
+        ((result.grouping && result.grouping.unidentified_documents) || []).length + '</p>' +
+        '<p><strong>Extraction errors:</strong> ' + (result.extraction_errors || []).length + '</p></div>' +
+        '<p class="review-note">Edit extracted fields below, then save. Source movement evidence and review flags are retained. Saving does not approve or export this batch.</p>';
+
+    reviewSections.forEach(section => {
+        const rows = result[section.key] || [];
+        html += '<div class="result-section"><h3>' + section.title + ' (' + rows.length + ')</h3>';
+        if (!rows.length) html += '<p class="empty-state">No records found.</p>';
+        rows.forEach((row,index) => {
+            html += '<div class="result-item review-record"><h4>' + section.title + ' #' + (index+1) + '</h4><div class="review-grid">';
+            section.fields.forEach(pair => {
+                const field = pair[0], label = pair[1];
+                let value = row[field];
+                if (field === "drop_offs" && Array.isArray(value)) value = value.join(", ");
+                html += '<label class="review-field"><span>' + escapeHTML(label) + '</span>' +
+                    '<input type="text" data-review-section="' + section.key +
+                    '" data-review-index="' + index + '" data-review-field="' + field +
+                    '" value="' + escapeHTML(value == null ? "" : value) + '"></label>';
+            });
+            html += '</div>';
+            if (row.segments && row.segments.length) {
+                html += '<p><strong>Movement evidence (read-only):</strong></p><ul>';
+                row.segments.forEach(segment => {
+                    html += '<li>' + escapeHTML(segment.origin || "Unknown") + ' → ' +
+                        escapeHTML(segment.destination || "Unknown") + ' · ' +
+                        escapeHTML(segment.departure_time || segment.arrival_time || "Time not captured") +
+                        ' · ' + escapeHTML(segment.movement_type || "unclassified") + '</li>';
+                });
+                html += '</ul>';
+            }
+            html += '<p class="review-flags"><strong>Review flags:</strong> ' +
+                escapeHTML((row.review_flags || []).join("; ") || "None reported") + '</p></div>';
+        });
+        html += '</div>';
+    });
+
+    const unresolved = result.unresolved_items || [];
+    const errors = result.extraction_errors || [];
+    if (unresolved.length || errors.length) {
+        html += '<div class="result-section"><h3>Unresolved items and extraction errors</h3>';
+        [...unresolved, ...errors].forEach(item => {
+            html += '<div class="result-item">' +
+                escapeHTML(typeof item === "string" ? item : JSON.stringify(item)) + '</div>';
+        });
+        html += '</div>';
+    }
+    html += '<button type="button" class="primary-button" id="saveReviewButton">Save review edits</button>' +
+        '<span id="reviewSaveMessage" class="message"></span>';
+    analysisResults.innerHTML = html;
+    document.getElementById("saveReviewButton").addEventListener("click", saveReviewEdits);
+}
+
+async function saveReviewEdits() {
+    if (!activeReviewBatchId || !activeReviewResult) return;
+    const button = document.getElementById("saveReviewButton");
+    const message = document.getElementById("reviewSaveMessage");
+    button.disabled = true;
+    message.textContent = "Saving edits...";
+    try {
+        const updated = JSON.parse(JSON.stringify(activeReviewResult));
+        document.querySelectorAll("[data-review-section]").forEach(input => {
+            const section = input.dataset.reviewSection;
+            const index = Number(input.dataset.reviewIndex);
+            const field = input.dataset.reviewField;
+            const value = input.value.trim();
+            updated[section][index][field] = section === "trips" && field === "drop_offs"
+                ? (value ? value.split(",").map(part => part.trim()).filter(Boolean) : [])
+                : (value || null);
+        });
+        const response = await apiRequest("/api/review/" + encodeURIComponent(activeReviewBatchId), {
+            method: "PUT",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify(updated)
+        });
+        activeReviewResult = updated;
+        message.textContent = response.message || "Review edits saved.";
+        message.className = "message success";
+        await loadBatches();
+    } catch (error) {
+        message.textContent = error.message;
+        message.className = "message error";
+    } finally {
+        button.disabled = false;
     }
 }
 
-
-// --------------------------------------------------
-
 async function loadResults(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
-    renderAnalysis(result);
+    const state = await apiRequest("/api/results/" + encodeURIComponent(batchId));
+    if (state.status === "completed" && state.result) {
+        renderAnalysis(state.result, batchId);
+    } else if (["failed","queue_failed"].includes(state.status)) {
+        analysisResults.innerHTML = '<div class="result-item"><h3>Analysis ' +
+            escapeHTML(state.status) + '</h3><p>' +
+            escapeHTML(state.error || "The worker could not complete this batch.") + '</p></div>';
+    } else {
+        analysisResults.innerHTML = '<p class="empty-state">Batch status: ' +
+            escapeHTML(state.status || "pending") + '.</p>';
+    }
 }
-
-function renderAnalysis(result) {
-    const trips = result.trips || [];
-    const tolls = result.toll_reimbursements || [];
-    const parking = result.parking_reimbursements || [];
-
-    const driverName = result.driver?.name || "Unidentified";
-
-    let html = `
-        <div class="result-section">
-            <h3>Driver Information</h3>
-            <div class="result-item">
-                <p><strong>Driver:</strong>
-                    ${escapeHTML(driverName)}
-                </p>
-                <p><strong>Documents:</strong>
-                    ${result.documents_processed || 0}
-                </p>
-                <p><strong>Approval:</strong>
-                    ${escapeHTML(result.approval_status || "pending_review")}
-                </p>
-            </div>
-        </div>
-
-        <div class="result-section">
-            <h3>Trip Records (${trips.length})</h3>
-    `;
-
-    trips.forEach((trip, index) => {
-        html += `
-            <div class="result-item">
-                <p><strong>Trip ${index + 1}</strong></p>
-                <p>Date: ${escapeHTML(trip.trip_date)}</p>
-                <p>Trip Ticket: ${escapeHTML(trip.trip_ticket_number)}</p>
-                <p>Line Haul: ${escapeHTML(trip.line_haul_trip_number)}</p>
-                <p>Origin: ${escapeHTML(trip.origin)}</p>
-                <p>Destination: ${escapeHTML(trip.destination)}</p>
-                <p>Segments: ${(trip.segments || []).length}</p>
-                <p>Review Flags:
-                    ${escapeHTML((trip.review_flags || []).join("; ") || "None")}
-                </p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Toll Reimbursements (${tolls.length})</h3>
-    `;
-
-    tolls.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Parking Reimbursements (${parking.length})</h3>
-    `;
-
-    parking.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Unresolved Items</h3>
-            <div class="result-item">
-                ${escapeHTML(
-                    (result.unresolved_items || []).join("; ") ||
-                    "No unresolved items reported."
-                )}
-            </div>
-        </div>
-    `;
-
-    analysisResults.innerHTML = html;
-}
-
-// --------------------------------------------------
-// APPROVAL AND EXPORT
-// --------------------------------------------------
 
 async function approveBatch(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
-    if (result.overall_review_required !== false) {
-        alert(
-            "This batch still requires review. " +
-            "The system will not approve it automatically."
-        );
-
-        return;
-    }
-
-    if (!confirm(
-        "Have you reviewed this batch and verified all records? " +
-        "Approval will export the data to Google Sheets."
-    )) {
-        return;
-    }
-
-    result.approval_status = "approved";
-
-    // The backend must also persist this approval state
-    // before export. The current starter endpoint does not
-    // yet provide that operation, so export remains blocked
-    // until the approval API is implemented.
-    alert(
-        "Approval workflow is not yet enabled. " +
-        "Backend approval persistence must be implemented first."
-    );
+    alert("Approval and Google Sheets export remain disabled. You can save review edits, but no data is exported.");
 }
 
-// --------------------------------------------------
 // INITIALIZATION
 // --------------------------------------------------
 
