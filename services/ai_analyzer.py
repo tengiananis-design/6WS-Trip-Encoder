@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+import time
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -32,14 +33,33 @@ def get_ai_client():
 
 
 def generate_json(prompt: str) -> dict:
-    response = get_ai_client().models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1
-        )
-    )
+    # Gemini can temporarily return 429/503 during demand spikes. Retry only
+    # transient capacity/rate-limit errors; fail fast for invalid requests/keys.
+    for attempt in range(4):
+        try:
+            response = get_ai_client().models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            break
+        except Exception as error:
+            status = getattr(error, "status_code", None) or getattr(error, "code", None)
+            message = str(error)
+            transient = status in (429, 500, 502, 503, 504) or any(
+                token in message for token in ("429", "500", "502", "503", "504")
+            )
+            if not transient or attempt == 3:
+                raise
+            delay = min(2 ** (attempt + 1), 12)
+            logger.warning(
+                "Gemini transient error (attempt %s/4); retrying in %s seconds: %s",
+                attempt + 1, delay, message[:300]
+            )
+            time.sleep(delay)
     if not response.text:
         raise RuntimeError("AI returned an empty response.")
     try:
@@ -216,6 +236,15 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
     # First AI pass identifies each document's driver and type from short samples.
     # This prevents a single 100-PDF prompt and avoids mixing drivers.
     identification, identification_errors = await identify_documents_in_parallel(extracted_documents)
+    if identification_errors and not identification:
+        details = "; ".join(
+            f"{', '.join(item.get('filenames', []))}: {item.get('error', 'identification failed')}"
+            for item in identification_errors
+        )
+        raise RuntimeError(
+            "Document identification failed for every file group; no trustworthy driver results were produced. "
+            + details
+        )
     grouped = {}
     unidentified = []
     for document in extracted_documents:
