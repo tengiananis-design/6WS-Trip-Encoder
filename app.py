@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -147,18 +147,21 @@ async def list_batches():
     return {"batches": batches}
 
 
-@app.post("/api/analyze/{batch_id}")
-async def analyze_batch(batch_id: str):
-    batch_id = safe_batch_id(batch_id)
-    batch_dir = UPLOAD_DIR / batch_id
-    if not batch_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Batch not found.")
+def _run_analysis_job(batch_id: str, batch_dir: Path):
+    import asyncio
+    from services.job_store import write_job
+    from services.ai_analyzer import analyze_batch_documents
+    from services.pipeline import validate_analysis_result
 
     try:
-        from services.ai_analyzer import analyze_batch_documents
-        from services.pipeline import validate_analysis_result
-
-        result = await analyze_batch_documents(batch_dir)
+        write_job(batch_dir, batch_id=batch_id, status="processing", stage="starting",
+                  completed_documents=0, total_documents=len(list(batch_dir.glob("*.pdf"))),
+                  error=None, started_at=datetime.now(timezone.utc).isoformat())
+        def progress(done, total, filename):
+            write_job(batch_dir, status="processing", stage="analyzing_documents",
+                      completed_documents=done, total_documents=total,
+                      current_filename=filename)
+        result = asyncio.run(analyze_batch_documents(batch_dir, progress_callback=progress))
         result = validate_analysis_result(result)
         result["batch_id"] = batch_id
         result["approval_status"] = "pending_review"
@@ -166,10 +169,47 @@ async def analyze_batch(batch_id: str):
         temp_file = result_file.with_suffix(".tmp")
         temp_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         temp_file.replace(result_file)
-        return {"message": "Analysis completed; human review is required.", "batch_id": batch_id, "result": result}
+        write_job(batch_dir, status="completed", stage="review_ready",
+                  completed_documents=result.get("documents_processed", 0),
+                  result_available=True, finished_at=datetime.now(timezone.utc).isoformat())
     except Exception as error:
         logger.exception("Analysis failed for batch %s", batch_id)
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {error}")
+        write_job(batch_dir, status="failed", stage="error", error=str(error),
+                  finished_at=datetime.now(timezone.utc).isoformat())
+
+
+@app.post("/api/analyze/{batch_id}")
+async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
+    from services.job_store import read_job, write_job
+    batch_id = safe_batch_id(batch_id)
+    batch_dir = UPLOAD_DIR / batch_id
+    if not batch_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    current = read_job(batch_dir)
+    if current and current.get("status") == "processing":
+        return {"message": "Analysis is already running.", "batch_id": batch_id, "job": current}
+    if (RESULT_DIR / f"{batch_id}.json").is_file():
+        raise HTTPException(status_code=409, detail="Analysis result already exists. Review it instead of running analysis again.")
+    total = len(list(batch_dir.glob("*.pdf")))
+    write_job(batch_dir, batch_id=batch_id, status="queued", stage="queued",
+              completed_documents=0, total_documents=total, error=None,
+              queued_at=datetime.now(timezone.utc).isoformat())
+    background_tasks.add_task(_run_analysis_job, batch_id, batch_dir)
+    return {"message": "Analysis queued. You can monitor progress.", "batch_id": batch_id,
+            "job": read_job(batch_dir)}
+
+
+@app.get("/api/jobs/{batch_id}")
+async def get_analysis_job(batch_id: str):
+    from services.job_store import read_job
+    batch_id = safe_batch_id(batch_id)
+    batch_dir = UPLOAD_DIR / batch_id
+    if not batch_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    job = read_job(batch_dir)
+    if not job:
+        return {"batch_id": batch_id, "status": "not_started"}
+    return job
 
 
 @app.get("/api/results/{batch_id}")
