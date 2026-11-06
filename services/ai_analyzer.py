@@ -14,7 +14,7 @@ from services.ocr_engine import extract_complete_pdf
 
 logger = logging.getLogger(__name__)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "4")), 8))
+EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "2")), 8))
 _client = None
 
 
