@@ -1,6 +1,8 @@
 
 import logging
 import re
+from datetime import datetime, timezone
+from dateutil import parser as date_parser
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,20 @@ def normalize_segment(
     }
 
 
+def _segment_chronology_key(item):
+    original_index, segment = item
+    value = segment.get("departure_time") or segment.get("arrival_time")
+    if not value:
+        return (1, datetime.max, original_index)
+    try:
+        parsed = date_parser.parse(str(value), fuzzy=False)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return (0, parsed, original_index)
+    except (ValueError, TypeError, OverflowError):
+        return (1, datetime.max, original_index)
+
+
 def process_trip(trip: dict) -> dict:
     """
     Validate and normalize one analyzed trip.
@@ -116,10 +132,13 @@ def process_trip(trip: dict) -> dict:
     """
 
     segments = trip.get("segments", [])
+    indexed_segments = list(enumerate(segments))
+    if any(segment.get("departure_time") or segment.get("arrival_time") for segment in segments):
+        indexed_segments.sort(key=_segment_chronology_key)
 
     processed_segments = []
 
-    for index, segment in enumerate(segments, start=1):
+    for index, (_, segment) in enumerate(indexed_segments, start=1):
         processed_segments.append(
             normalize_segment(segment, index)
         )
