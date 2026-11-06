@@ -206,8 +206,12 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
     current = read_job(batch_dir)
     if current and current.get("status") == "processing":
         return {"message": "Analysis is already running.", "batch_id": batch_id, "job": current}
-    if (RESULT_DIR / f"{batch_id}.json").is_file():
+    if (RESULT_DIR / f"{batch_id}.json").is_file() or (storage.shared_storage_enabled() and storage.exists(f"results/{batch_id}.json")):
         raise HTTPException(status_code=409, detail="Analysis result already exists. Review it instead of running analysis again.")
+    if storage.shared_storage_enabled() and storage.exists(f"jobs/{batch_id}.json"):
+        existing_job = storage.load_json(f"jobs/{batch_id}.json")
+        if existing_job.get("status") in ("queued", "processing"):
+            return {"message": "Analysis is already queued or running.", "batch_id": batch_id, "job": existing_job}
     if storage.shared_storage_enabled() and storage.exists(f"uploads/{batch_id}/batch.json"):
         total = int(storage.load_json(f"uploads/{batch_id}/batch.json").get("document_count", 0))
     else:
