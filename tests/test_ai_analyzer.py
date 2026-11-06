@@ -29,20 +29,29 @@ class PageWindowTests(unittest.TestCase):
     def test_duplicate_receipt_on_overlap_merges_page_evidence(self):
         rows = [
             {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
-             "source_pages": [12]},
+             "source_pages": [12], "_analysis_window": 0},
             {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
-             "source_pages": [12]},
+             "source_pages": [12], "_analysis_window": 1},
         ]
         merged = _merge_chunk_records(rows, "toll_reimbursements")
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["source_pages"], [12])
 
+    def test_two_identical_receipts_in_same_window_are_preserved(self):
+        rows = [
+            {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
+             "source_pages": [12], "_analysis_window": 0},
+            {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
+             "source_pages": [12], "_analysis_window": 0},
+        ]
+        self.assertEqual(len(_merge_chunk_records(rows, "toll_reimbursements")), 2)
+
     def test_different_receipts_are_not_collapsed(self):
         rows = [
             {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
-             "source_pages": [12]},
+             "source_pages": [12], "_analysis_window": 0},
             {"date": "2026-11-01", "amount": "100", "tag_number": "A1",
-             "source_pages": [13]},
+             "source_pages": [13], "_analysis_window": 1},
         ]
         self.assertEqual(len(_merge_chunk_records(rows, "toll_reimbursements")), 2)
 
