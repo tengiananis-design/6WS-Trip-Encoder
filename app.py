@@ -355,4 +355,26 @@ async def api_information():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("%s started successfully.", APP_NAME)
+    # FastAPI BackgroundTasks live only inside this process. If Render restarts
+    # while a batch is queued or processing, that task is gone; leaving the old
+    # status untouched would make the UI poll forever and block a retry.
+    recovered = 0
+    for status_file in RESULT_DIR.glob("*.status.json"):
+        try:
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            if status.get("status") in ("queued", "processing"):
+                status.update({
+                    "status": "failed",
+                    "message": (
+                        "Analysis was interrupted by a server restart. "
+                        "Please select Analyze Documents to retry this batch."
+                    ),
+                    "interrupted_at": datetime.utcnow().isoformat()
+                })
+                temporary = status_file.with_suffix(status_file.suffix + ".tmp")
+                temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+                temporary.replace(status_file)
+                recovered += 1
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Could not recover analysis status file %s", status_file)
+    logger.info("%s started successfully. Recovered %s interrupted analysis job(s).", APP_NAME, recovered)
