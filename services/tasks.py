@@ -38,7 +38,7 @@ def analyze_batch_task(self, batch_id: str):
                     "current_filename": filename
                 })
 
-            result = asyncio.run(analyze_batch_documents(batch_dir, progress_callback=progress))
+            result = asyncio.run(analyze_batch_documents(batch_dir, progress_callback=progress, manual_assignments=manifest.get("manual_assignments", {})))
             result = validate_analysis_result(result)
             result["batch_id"] = batch_id
             result["approval_status"] = "pending_review"
