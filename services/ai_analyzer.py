@@ -67,9 +67,9 @@ Return valid JSON only:
 {{
  "driver":{{"name":null,"confidence":"unknown","evidence":[]}},
  "documents":[{{"filename":"","document_type":"trip_ticket | toll_reimbursement | parking_reimbursement | unknown","pages_used":[],"notes":[]}}],
- "trips":[{{"trip_ticket_number":null,"line_haul_trip_number":null,"trip_date":null,"origin":null,"drop_offs":[],"destination":null,"return_origin":null,"segments":[{{"sequence":1,"origin":null,"destination":null,"departure_time":null,"arrival_time":null,"movement_type":"outbound | return | backload | parking | unknown","source_pages":[]}}],"check_in_time_actual":null,"docking_time":null,"check_out_time_actual":null,"review_flags":[],"confidence":"high | medium | low"}}],
- "toll_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"review_flags":[]}}],
- "parking_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"review_flags":[]}}],
+ "trips":[{{"trip_ticket_number":null,"line_haul_trip_number":null,"trip_date":null,"origin":null,"drop_offs":[],"destination":null,"return_origin":null,"source_references":[{{"filename":"","page_number":1,"fact":""}}],"segments":[{{"sequence":1,"origin":null,"destination":null,"departure_time":null,"arrival_time":null,"movement_type":"outbound | return | backload | parking | unknown","source_pages":[],"source_references":[{{"filename":"","page_number":1,"fact":""}}]}}],"check_in_time_actual":null,"docking_time":null,"check_out_time_actual":null,"review_flags":[],"confidence":"high | medium | low"}}],
+ "toll_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_references":[{{"filename":"","page_number":1,"fact":""}}],"review_flags":[]}}],
+ "parking_reimbursements":[{{"date":null,"location":null,"amount":null,"receipt_reference":null,"source_pages":[],"source_references":[{{"filename":"","page_number":1,"fact":""}}],"review_flags":[]}}],
  "unresolved_items":[],"overall_review_required":true
 }}
 EVIDENCE:
