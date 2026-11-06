@@ -20,6 +20,20 @@ def validate_analysis_result(result: dict) -> dict:
     result["toll_reimbursements"] = processed_expenses["toll_reimbursements"]
     result["parking_reimbursements"] = processed_expenses["parking_reimbursements"]
 
+    # Keep the per-driver view synchronized with the canonical top-level
+    # records used by review and Google Sheets export.
+    for group in result.get("driver_groups", []):
+        group_name = group.get("driver", {}).get("name")
+        group["trips"] = [
+            trip for trip in result["trips"] if trip.get("driver_name") == group_name
+        ]
+        group["toll_reimbursements"] = [
+            record for record in result["toll_reimbursements"] if record.get("driver_name") == group_name
+        ]
+        group["parking_reimbursements"] = [
+            record for record in result["parking_reimbursements"] if record.get("driver_name") == group_name
+        ]
+
     flags = list(result.get("unresolved_items") or [])
     for trip in result["trips"]:
         flags.extend(trip.get("review_flags", []))
