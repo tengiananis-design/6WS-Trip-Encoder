@@ -70,7 +70,7 @@ def prepare_trip_rows(result: dict) -> list[list[Any]]:
     for trip in result.get("trips", []):
         for segment in trip.get("segments", []):
             rows.append([
-                result.get("driver", {}).get("name"),
+                trip.get("driver_name") or result.get("driver", {}).get("name"),
                 trip.get("trip_date"),
                 trip.get("trip_ticket_number"),
                 trip.get("line_haul_trip_number"),
@@ -91,7 +91,7 @@ def prepare_trip_rows(result: dict) -> list[list[Any]]:
 def prepare_reimbursement_rows(records: list[dict], driver_name: str) -> list[list[Any]]:
     return [
         [
-            driver_name,
+            record.get("driver_name") or driver_name,
             record.get("date"),
             record.get("location"),
             record.get("amount"),
