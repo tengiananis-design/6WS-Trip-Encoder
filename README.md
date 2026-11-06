@@ -10,7 +10,7 @@ AI-assisted PDF Trip Ticket and Reimbursement Encoder.
 - Analyze trip tickets using an AI model.
 - Identify and group documents by driver.
 - Process trip ticket information.
-- Separate toll and parking reimbursements.
+- Separate toll, parking, and passway reimbursements.
 - Review extracted information before approval.
 - Export approved results to Google Sheets.
 
