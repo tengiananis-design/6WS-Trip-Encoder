@@ -21,6 +21,7 @@ for directory in (DATA_DIR, UPLOAD_DIR, RESULT_DIR):
 
 MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "200"))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+MAX_BATCH_SIZE_MB = int(os.getenv("MAX_BATCH_SIZE_MB", "1024"))
 CHUNK_SIZE = 1024 * 1024
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(APP_NAME)
@@ -44,6 +45,7 @@ async def application_status():
         "pdf_processing": "streamed_to_disk",
         "max_files_per_batch": MAX_FILES_PER_BATCH,
         "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "max_batch_size_mb": MAX_BATCH_SIZE_MB,
         "ai_analysis": "per_document",
         "google_sheets": "requires_credentials_and_spreadsheet_configuration"
     }
@@ -64,6 +66,7 @@ async def upload_documents(files: list[UploadFile] = File(...)):
     batch_dir.mkdir(parents=True, exist_ok=False)
     uploaded_files, rejected_files = [], []
     seen_names = set()
+    batch_bytes = 0
 
     try:
         for index, uploaded in enumerate(files, start=1):
@@ -92,7 +95,9 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                             signature = chunk[:5]
                         total += len(chunk)
                         if total > MAX_FILE_SIZE_MB * 1024 * 1024:
-                            raise ValueError(f"File exceeds {MAX_FILE_SIZE_MB} MB limit.")
+                            raise ValueError(f"File exceeds {MAX_FILE_SIZE_MB} MB per-file limit.")
+                        if batch_bytes + total > MAX_BATCH_SIZE_MB * 1024 * 1024:
+                            raise ValueError(f"Batch exceeds {MAX_BATCH_SIZE_MB} MB total limit.")
                         output.write(chunk)
 
                 if not signature.startswith(b"%PDF"):
@@ -100,6 +105,7 @@ async def upload_documents(files: list[UploadFile] = File(...)):
                     rejected_files.append({"filename": original, "reason": "Invalid PDF file signature."})
                     continue
 
+                batch_bytes += total
                 uploaded_files.append({
                     "filename": safe_name,
                     "original_filename": original,
