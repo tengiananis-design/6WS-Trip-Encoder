@@ -220,7 +220,7 @@ async def api_status():
         "status": "ready",
         "analysis_mode": "celery_worker" if durable else "local_background_task",
         "durable_queue": durable,
-        "durable_file_storage": bool(os.getenv("S3_BUCKET")),
+        "durable_file_storage": durable,
         "worker_command": "celery -A worker.celery_app worker --loglevel=INFO --concurrency=1",
         "limits": {"files_per_batch": MAX_FILES_PER_BATCH,
                    "file_size_mb": MAX_FILE_SIZE_MB,
