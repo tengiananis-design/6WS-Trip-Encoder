@@ -62,6 +62,7 @@ def normalize_expense(
         )
 
     return {
+        "driver_name": expense.get("driver_name"),
         "expense_type": expense_type,
         "date": expense.get("date"),
         "location": expense.get("location"),
