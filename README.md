@@ -93,6 +93,19 @@ This starter project requires configuration and testing before production use.
 Always review extracted trip and reimbursement data before approving any Google Sheets export.
 
 
+## Manual driver assignment before analysis
+
+The batch card includes an optional JSON editor for PDFs that do not print a driver name. Use the uploaded stored filename as the key and the correct driver name as the value:
+
+```json
+{
+  "0002_toll_receipt.pdf": "JUAN DELA CRUZ",
+  "0003_parking_receipt.pdf": "JUAN DELA CRUZ"
+}
+```
+
+Save these assignments before starting analysis. The same assignments are applied in local and distributed worker processing. If the PDF itself identifies a different driver, the conflict is held for human review instead of silently overriding the extracted identity.
+
 ## Batch processing and job monitoring
 
 The analysis endpoint now queues work through FastAPI background tasks:
@@ -114,7 +127,7 @@ The upload endpoint streams each file to disk, allows up to 150 PDFs per batch b
 
 ### Verification status
 
-The GitHub Actions unit-test workflow is configured for the development branch. A successful workflow run and end-to-end test with representative trip tickets, toll receipts, and parking receipts are still required before production use.
+The GitHub Actions workflow now checks Python compilation, JavaScript syntax, application import, production Docker image build, and unit tests. The latest run passed. This does not replace an end-to-end test with real trip tickets, toll receipts, parking receipts, live Google Sheets credentials, and a configured worker.
 
 
 ## Distributed worker architecture (development branch)
