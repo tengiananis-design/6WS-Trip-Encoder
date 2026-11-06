@@ -407,6 +407,12 @@ async def _approve_batch_locked(batch_id: str, request: Request):
         logger.exception("Export failed for approved batch %s", batch_id)
         result["approval_status"] = "export_failed_manual_reconciliation"
         result["export_error"] = str(error)
+        result["partial_export"] = {
+            "failed_sheet": getattr(error, "failed_sheet", None),
+            "completed_exports": getattr(error, "completed_exports", []),
+            "automatic_retry_blocked": True,
+            "reconciliation_required": True
+        }
         if storage.shared_storage_enabled():
             storage.save_json(result_key, result)
         else:
