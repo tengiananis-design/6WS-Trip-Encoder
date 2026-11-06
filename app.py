@@ -344,7 +344,7 @@ async def analyze_batch(batch_id: str, background_tasks: BackgroundTasks):
 async def preview_source_page(batch_id: str, filename: str, page_number: int):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", batch_id):
         raise HTTPException(status_code=400, detail="Invalid batch ID.")
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,180}\\.pdf", filename, flags=re.IGNORECASE):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,180}\.pdf", filename, flags=re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Invalid PDF filename.")
     if page_number < 1 or page_number > 500:
         raise HTTPException(status_code=400, detail="Page number must be between 1 and 500.")

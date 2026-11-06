@@ -17,6 +17,19 @@ class TripProcessorTests(unittest.TestCase):
     def test_non_soc_to_non_mfm_is_not_backload(self):
         self.assertEqual(determine_movement_type("Dasol Hub", "Bolinao Hub"), "intermediate")
 
+    def test_source_page_references_survive_trip_normalization(self):
+        trip = process_trip({
+            "origin": "SOC 6",
+            "destination": "Bolinao",
+            "source_filename": "ticket.pdf",
+            "segments": [
+                {"origin": "SOC 6", "destination": "Bolinao", "source_pages": [2, 1]},
+                {"origin": "Bolinao", "destination": "SOC 6", "source_pages": [3]},
+            ]
+        })
+        self.assertEqual(trip["source_filename"], "ticket.pdf")
+        self.assertEqual(trip["source_pages"], [1, 2, 3])
+
     def test_missing_route_is_flagged(self):
         trip = process_trip({"origin": "SOC 6", "destination": None, "segments": []})
         self.assertEqual(trip["status"], "review_required")
