@@ -136,3 +136,14 @@ def save_json(key: str, value: dict):
 def load_json(key: str):
     import json
     return json.loads(get_bytes(key).decode("utf-8"))
+
+
+def upload_file(key: str, source_path: Path, content_type: str = "application/octet-stream"):
+    if shared_storage_enabled():
+        _s3().upload_file(str(source_path), BUCKET, _key(key), ExtraArgs={"ContentType": content_type})
+        return
+    target = DATA_DIR / key
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() != target.resolve():
+        import shutil
+        shutil.copy2(source_path, target)
