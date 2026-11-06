@@ -135,6 +135,157 @@ def analyze_documents(documents: list[dict]) -> dict[str, Any]:
     return result
 
 
+MAX_PAGES_PER_AI_REQUEST = 12
+PAGE_OVERLAP = 2
+
+
+def _page_windows(pages: list[dict], size: int = MAX_PAGES_PER_AI_REQUEST,
+                  overlap: int = PAGE_OVERLAP) -> list[list[dict]]:
+    if size < 1 or overlap < 0 or overlap >= size:
+        raise ValueError("Invalid AI page-window configuration.")
+    windows = []
+    start = 0
+    while start < len(pages):
+        end = min(start + size, len(pages))
+        windows.append(pages[start:end])
+        if end == len(pages):
+            break
+        start = end - overlap
+    return windows
+
+
+def _page_numbers(record: dict) -> set:
+    values = record.get("source_pages") or record.get("pages_used") or []
+    return {str(value) for value in values if value is not None}
+
+
+def _merge_record(target: dict, incoming: dict, label: str) -> dict:
+    merged = dict(target)
+    conflicts = list(merged.get("review_flags") or [])
+    for key, value in incoming.items():
+        if key in ("source_pages", "pages_used"):
+            merged[key] = sorted(set(merged.get(key) or []) | set(value or []),
+                                 key=lambda item: (str(type(item)), str(item)))
+        elif key in ("segments",):
+            existing = merged.setdefault(key, [])
+            known = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in existing}
+            for segment in value or []:
+                signature = json.dumps(segment, sort_keys=True, ensure_ascii=False)
+                if signature not in known:
+                    existing.append(segment)
+                    known.add(signature)
+        elif key in ("drop_offs",):
+            existing = merged.setdefault(key, [])
+            for item in value or []:
+                if item not in existing:
+                    existing.append(item)
+        elif merged.get(key) in (None, "", []) and value not in (None, "", []):
+            merged[key] = value
+        elif value not in (None, "", []) and merged.get(key) not in (None, "", []) and merged.get(key) != value:
+            conflicts.append(f"Conflicting {label} field across page windows: {key}.")
+    if conflicts:
+        merged["review_flags"] = list(dict.fromkeys(conflicts))
+    return merged
+
+
+def _merge_chunk_records(records: list[dict], kind: str) -> list[dict]:
+    merged = []
+    by_trip_identity = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if kind == "trips":
+            trip_number = record.get("line_haul_trip_number") or record.get("trip_ticket_number")
+            if trip_number:
+                identity = ("trip", str(trip_number).strip().casefold(),
+                            str(record.get("trip_date") or "").strip())
+            else:
+                identity = ("exact", json.dumps(record, sort_keys=True, ensure_ascii=False))
+            if identity in by_trip_identity:
+                position = by_trip_identity[identity]
+                merged[position] = _merge_record(merged[position], record, "trip")
+            else:
+                by_trip_identity[identity] = len(merged)
+                merged.append(dict(record))
+            continue
+
+        pages = _page_numbers(record)
+        stable_fields = ("date", "trip_date", "date_of_or", "tag_number", "amount",
+                         "origin", "destination", "entry_point", "exit_point",
+                         "vendor_name", "address", "rfid_toll_charges")
+        signature = tuple(str(record.get(field) or "").strip().casefold() for field in stable_fields)
+        duplicate_index = None
+        for index, existing in enumerate(merged):
+            if signature == tuple(str(existing.get(field) or "").strip().casefold() for field in stable_fields):
+                if pages and pages.intersection(_page_numbers(existing)):
+                    duplicate_index = index
+                    break
+        if duplicate_index is None:
+            merged.append(dict(record))
+        else:
+            merged[duplicate_index] = _merge_record(merged[duplicate_index], record, kind)
+    return merged
+
+
+def merge_page_window_analyses(analyses: list[dict], filename: str,
+                               total_pages: int) -> dict:
+    if not analyses:
+        raise RuntimeError(f"No AI page windows were successfully analyzed for {filename}.")
+    drivers = [item.get("driver") for item in analyses if item.get("driver")]
+    driver = drivers[0] if drivers else {}
+    driver_names = {
+        normalize_driver_name(item.get("name"))
+        for item in drivers if isinstance(item, dict) and item.get("name")
+    }
+    conflicts = len(driver_names) > 1
+    merged = {
+        "driver": driver,
+        "documents": [],
+        "trips": [],
+        "toll_reimbursements": [],
+        "parking_reimbursements": [],
+        "passway_reimbursements": [],
+        "unresolved_items": []
+    }
+    for item in analyses:
+        for document in item.get("documents", []) or []:
+            merged["documents"].append(document)
+        for field in ("trips", "toll_reimbursements", "parking_reimbursements",
+                      "passway_reimbursements", "unresolved_items"):
+            merged[field].extend(item.get(field, []) or [])
+    merged["trips"] = _merge_chunk_records(merged["trips"], "trips")
+    for field in ("toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
+        merged[field] = _merge_chunk_records(merged[field], field)
+    unique_documents = {}
+    for document in merged["documents"]:
+        key = document.get("filename") or filename
+        if key not in unique_documents:
+            unique_documents[key] = dict(document)
+        else:
+            unique_documents[key] = _merge_record(unique_documents[key], document, "document")
+    merged["documents"] = list(unique_documents.values()) or [{
+        "filename": filename, "document_type": "unknown",
+        "pages_used": list(range(1, total_pages + 1)), "notes": []
+    }]
+    merged["chunk_count"] = len(analyses)
+    merged["chunked_analysis_review_required"] = len(analyses) > 1 or conflicts
+    if len(analyses) > 1:
+        note = "Long PDF analyzed in overlapping page windows; verify trip and receipt records across page boundaries."
+        for document in merged["documents"]:
+            document.setdefault("notes", []).append(note)
+        for field in ("trips", "toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
+            for record in merged[field]:
+                flags = record.setdefault("review_flags", [])
+                flags.append("Long PDF used multiple AI page windows; verify this record against the source pages.")
+    if conflicts:
+        merged.setdefault("unresolved_items", []).append({
+            "filename": filename,
+            "reason": "Conflicting driver identities were returned by different page windows.",
+            "driver_candidates": sorted(driver_names)
+        })
+    return merged
+
+
 def _driver_name(result: dict) -> str:
     driver = result.get("driver") or {}
     return driver.get("name") if isinstance(driver, dict) else str(driver or "")
@@ -249,13 +400,21 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
                 raise RuntimeError(extraction.get("message", "OCR is unavailable."))
             page_text = "\n".join(p.get("text", "") for p in pages)
             hint = classify_document(pdf_path.name, page_text)
-            prompt_doc = [{
-                "filename": pdf_path.name,
-                "document_type_hint": hint,
-                "total_pages": extraction.get("total_pages"),
-                "pages": pages
-            }]
-            analysis = await asyncio.to_thread(analyze_documents, prompt_doc)
+            windows = _page_windows(pages)
+            window_analyses = []
+            for window_index, page_window in enumerate(windows, start=1):
+                prompt_doc = [{
+                    "filename": pdf_path.name,
+                    "document_type_hint": hint,
+                    "total_pages": extraction.get("total_pages"),
+                    "page_window": window_index,
+                    "page_window_count": len(windows),
+                    "pages": page_window
+                }]
+                window_analyses.append(await asyncio.to_thread(analyze_documents, prompt_doc))
+            analysis = merge_page_window_analyses(
+                window_analyses, pdf_path.name, len(pages)
+            )
             docs = analysis.get("documents") or [{
                 "filename": pdf_path.name,
                 "document_type": hint,
