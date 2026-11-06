@@ -59,7 +59,8 @@ def identify_document_owners(documents: list[dict]) -> dict:
             for page in pages[:3]
         ]
         summaries.append({
-            "filename": document["filename"],
+            "document_id": document.get("stored_filename") or document["filename"],
+            "original_filename": document["filename"],
             "page_count": document.get("total_pages"),
             "sample_pages": snippets
         })
@@ -68,7 +69,7 @@ def identify_document_owners(documents: list[dict]) -> dict:
 Identify the document type and driver named in each PDF. Use only visible evidence.
 Do not infer that two similar names are the same person. If no clear driver name,
 return null. Keep exact original filenames. Return JSON only:
-{"documents":[{"filename":"exact filename","driver_name":null,
+{"documents":[{"document_id":"exact document_id","driver_name":null,
 "document_type":"trip_ticket | toll_reimbursement | parking_reimbursement | unknown",
 "confidence":"high | medium | low","evidence_pages":[1],"review_flags":[]}]}
 Documents:
@@ -76,9 +77,9 @@ Documents:
     result = generate_json(prompt)
     by_filename = {}
     for item in result.get("documents", []):
-        filename = item.get("filename")
-        if filename:
-            by_filename[filename] = item
+        document_id = item.get("document_id")
+        if document_id:
+            by_filename[document_id] = item
     return by_filename
 
 
@@ -218,7 +219,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
     grouped = {}
     unidentified = []
     for document in extracted_documents:
-        identity = identification.get(document["filename"], {})
+        identity = identification.get(document.get("stored_filename") or document["filename"], {})
         document["driver_identification"] = identity
         document["document_type"] = identity.get("document_type", "unknown")
         driver_name = identity.get("driver_name")
