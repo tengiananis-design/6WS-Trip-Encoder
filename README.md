@@ -98,7 +98,7 @@ The analysis endpoint now queues work through FastAPI background tasks:
 - `POST /api/analyze/{batch_id}` starts analysis and returns a job record.
 - `GET /api/jobs/{batch_id}` reports queued, processing, completed, or failed status.
 - The dashboard polls the job endpoint and displays per-PDF progress.
-- Each PDF is extracted and analyzed separately before grouping by the driver's extracted name. Unidentified or conflicting driver identities remain in review.
+- Each PDF is first analyzed separately to establish driver identity. Documents with the same confirmed driver are then analyzed together so trip chronology and reimbursement evidence can be reconciled across that driver's PDFs. Different drivers are never intentionally combined. Unidentified, conflicting, or low-confidence identities remain in review.
 
 ### Important operational limitation
 
@@ -108,7 +108,7 @@ Before using this with real 100+ PDF batches, configure durable storage and move
 
 ### Batch sizing
 
-The upload endpoint streams each file to disk and currently enforces a 100 MB per-PDF limit. It does not yet provide resumable/chunked uploads, so very large combined upload requests should be tested against the hosting provider's request limits before relying on them.
+The upload endpoint streams each file to disk, allows up to 150 PDFs per batch by default, and enforces a configurable 100 MB per-PDF limit (`MAX_UPLOAD_FILES`, `MAX_UPLOAD_SIZE_MB`). It does not yet provide resumable/chunked uploads, so very large combined upload requests should be tested against the hosting provider's request limits before relying on them.
 
 ### Verification status
 
