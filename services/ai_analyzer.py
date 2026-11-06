@@ -163,23 +163,52 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
     groups = []
     all_trips, all_tolls, all_parking = [], [], []
     unresolved = []
+    group_analysis_requests = 0
     for group in grouping["grouped_documents"]:
         driver_name = group["driver_name"]
         group_docs = group["documents"]
-        group_trips, group_tolls, group_parking = [], [], []
-        confidences = []
-        evidence = []
-        for document in group_docs:
-            analysis = analyses_by_filename[document["filename"]]
-            driver = analysis.get("driver") or {}
-            confidences.append(driver.get("confidence", "unknown"))
-            evidence.extend(driver.get("evidence") or [])
-            group_trips.extend(analysis.get("trips") or [])
-            group_tolls.extend(analysis.get("toll_reimbursements") or [])
-            group_parking.extend(analysis.get("parking_reimbursements") or [])
-            unresolved.extend(analysis.get("unresolved_items") or [])
-
+        confidences = [
+            (analyses_by_filename[d["filename"]].get("driver") or {}).get("confidence", "unknown")
+            for d in group_docs
+        ]
+        evidence = [
+            item
+            for d in group_docs
+            for item in ((analyses_by_filename[d["filename"]].get("driver") or {}).get("evidence") or [])
+        ]
         confidence = "high" if confidences and all(value in ("high", "verified") for value in confidences) else "medium"
+
+        # Once document identity is established, analyze all documents for that
+        # driver together. This lets the model reconcile trip chronology and
+        # related evidence across separate trip-ticket PDFs without mixing drivers.
+        try:
+            group_analysis = analyze_documents(group_docs)
+            group_analysis_requests += 1
+            returned_driver = group_analysis.get("driver") or {}
+            returned_name = returned_driver.get("name")
+            from services.driver_grouping import normalize_driver_name
+            if returned_name and normalize_driver_name(returned_name) != driver_name:
+                unresolved.append({
+                    "type": "driver_identity_conflict",
+                    "driver_group": driver_name,
+                    "group_analysis_driver": returned_name,
+                    "message": "Combined document analysis returned a different driver identity; verify before approval."
+                })
+            group_trips = group_analysis.get("trips") or []
+            group_tolls = group_analysis.get("toll_reimbursements") or []
+            group_parking = group_analysis.get("parking_reimbursements") or []
+            unresolved.extend(group_analysis.get("unresolved_items") or [])
+        except Exception as error:
+            logger.exception("Combined analysis failed for driver group %s", driver_name)
+            group_trips, group_tolls, group_parking = [], [], []
+            confidence = "low"
+            unresolved.append({
+                "type": "driver_group_analysis_failed",
+                "driver": driver_name,
+                "documents": [d["filename"] for d in group_docs],
+                "message": str(error)
+            })
+
         for trip in group_trips:
             trip["driver_name"] = driver_name
         for expense in group_tolls + group_parking:
@@ -223,7 +252,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
         "unresolved_items": unresolved,
         "extraction_errors": extraction_errors,
         "analysis_model": GEMINI_MODEL,
-        "analysis_requests": len(per_document_analyses),
+        "analysis_requests": len(per_document_analyses) + group_analysis_requests,
         "overall_review_required": bool(unresolved or extraction_errors or any(g["driver"]["confidence"] not in ("high", "verified") for g in groups)),
         "approval_status": "pending_review"
     }
