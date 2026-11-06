@@ -103,6 +103,7 @@ def normalize_segment(
         "arrival_time": segment.get("arrival_time"),
         "movement_type": movement_type,
         "source_pages": segment.get("source_pages", []),
+        "source_references": segment.get("source_references", []),
         "review_required": (
             not origin
             or not destination
@@ -182,6 +183,7 @@ def process_trip(trip: dict) -> dict:
             trip.get("return_origin")
         ) or None,
         "segments": processed_segments,
+        "source_references": trip.get("source_references", []),
         "check_in_time_actual": trip.get(
             "check_in_time_actual"
         ),
