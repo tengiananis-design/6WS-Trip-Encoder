@@ -1,315 +1,233 @@
-
-import os
 import json
 import logging
+import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-# --------------------------------------------------
-# APPLICATION CONFIGURATION
-# --------------------------------------------------
-
 APP_NAME = "6WS Trip Encoder"
-APP_VERSION = "1.0.0"
-
+APP_VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(__import__("os").getenv("DATA_DIR", str(BASE_DIR / "data")))
 UPLOAD_DIR = DATA_DIR / "uploads"
 RESULT_DIR = DATA_DIR / "results"
+MAX_FILE_BYTES = 100 * 1024 * 1024
+CHUNK_BYTES = 1024 * 1024
 
-for directory in (DATA_DIR, UPLOAD_DIR, RESULT_DIR):
+for directory in (UPLOAD_DIR, RESULT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(APP_NAME)
 
-app = FastAPI(
-    title=APP_NAME,
-    version=APP_VERSION,
-    description="AI-assisted trip and reimbursement encoding system"
-)
-
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-app.mount(
-    "/static",
-    StaticFiles(directory=str(BASE_DIR / "static")),
-    name="static"
-)
 
-# --------------------------------------------------
-# APPLICATION HEALTH
-# --------------------------------------------------
+def safe_batch_id(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value or ""):
+        raise HTTPException(status_code=400, detail="Invalid batch ID.")
+    return value
+
 
 @app.get("/health")
 async def health():
-    return {
-        "application": APP_NAME,
-        "version": APP_VERSION,
-        "status": "online",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"application": APP_NAME, "version": APP_VERSION, "status": "online",
+            "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/status")
 async def application_status():
+    import os
     return {
         "status": "ready",
-        "pdf_processing": "configured_by_service",
-        "ai_analysis": "configured_by_environment",
-        "google_sheets": "configured_by_environment"
+        "pdf_processing": "available",
+        "ai_analysis": "configured" if os.getenv("GEMINI_API_KEY") else "missing_api_key",
+        "google_sheets": "configured" if os.getenv("GOOGLE_SPREADSHEET_ID") else "missing_spreadsheet_id",
+        "storage": str(DATA_DIR)
     }
 
-
-# --------------------------------------------------
-# MAIN DASHBOARD
-# --------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "app_name": APP_NAME,
-            "version": APP_VERSION
-        }
-    )
+    return templates.TemplateResponse("index.html", {
+        "request": request, "app_name": APP_NAME, "version": APP_VERSION
+    })
 
-
-# --------------------------------------------------
-# PDF UPLOAD
-# --------------------------------------------------
 
 @app.post("/api/upload")
-async def upload_documents(
-    files: list[UploadFile] = File(...)
-):
+async def upload_documents(files: list[UploadFile] = File(...)):
     if not files:
-        raise HTTPException(
-            status_code=400,
-            detail="No PDF files selected."
-        )
+        raise HTTPException(status_code=400, detail="No PDF files selected.")
 
-    batch_id = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    batch_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:8]
     batch_dir = UPLOAD_DIR / batch_id
-    batch_dir.mkdir(parents=True, exist_ok=True)
-
+    batch_dir.mkdir(parents=True, exist_ok=False)
     uploaded_files = []
 
-    for uploaded_file in files:
-        filename = Path(uploaded_file.filename or "").name
-
-        if not filename.lower().endswith(".pdf"):
-            continue
-
-        destination = batch_dir / filename
-
-        try:
-            contents = await uploaded_file.read()
-
-            if not contents.startswith(b"%PDF"):
+    try:
+        for index, uploaded in enumerate(files, start=1):
+            original_name = Path(uploaded.filename or f"document_{index}.pdf").name
+            if not original_name.lower().endswith(".pdf"):
                 continue
 
-            destination.write_bytes(contents)
+            safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_name).stem).strip("._") or f"document_{index}"
+            stored_name = f"{index:04d}_{safe_stem}.pdf"
+            destination = batch_dir / stored_name
+            total = 0
+            header = b""
 
-            uploaded_files.append({
-                "filename": filename,
-                "size_bytes": len(contents),
-                "path": str(destination.relative_to(BASE_DIR))
-            })
+            try:
+                with destination.open("wb") as output:
+                    while True:
+                        chunk = await uploaded.read(CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        if total == 0:
+                            header = chunk[:5]
+                        total += len(chunk)
+                        if total > MAX_FILE_BYTES:
+                            raise HTTPException(status_code=413, detail=f"{original_name} exceeds the 100 MB per-file limit.")
+                        output.write(chunk)
 
-        finally:
-            await uploaded_file.close()
+                if not header.startswith(b"%PDF"):
+                    destination.unlink(missing_ok=True)
+                    continue
 
-    if not uploaded_files:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid PDF files were uploaded."
-        )
+                uploaded_files.append({
+                    "filename": stored_name,
+                    "original_filename": original_name,
+                    "size_bytes": total
+                })
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            finally:
+                await uploaded.close()
 
-    batch_information = {
-        "batch_id": batch_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "document_count": len(uploaded_files),
-        "documents": uploaded_files,
-        "status": "uploaded"
-    }
+        if not uploaded_files:
+            raise HTTPException(status_code=400, detail="No valid PDF files were uploaded.")
 
-    batch_file = batch_dir / "batch.json"
-    batch_file.write_text(
-        json.dumps(batch_information, indent=2),
-        encoding="utf-8"
-    )
+        batch_info = {
+            "batch_id": batch_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "document_count": len(uploaded_files),
+            "documents": uploaded_files,
+            "status": "uploaded"
+        }
+        (batch_dir / "batch.json").write_text(json.dumps(batch_info, indent=2), encoding="utf-8")
+        return {"message": "Documents uploaded successfully.", **batch_info}
+    except Exception:
+        for item in batch_dir.iterdir():
+            if item.is_file():
+                item.unlink(missing_ok=True)
+        batch_dir.rmdir()
+        raise
 
-    return {
-        "message": "Documents uploaded successfully.",
-        **batch_information
-    }
-
-
-# --------------------------------------------------
-# DOCUMENT INVENTORY
-# --------------------------------------------------
 
 @app.get("/api/batches")
 async def list_batches():
     batches = []
-
+    if not UPLOAD_DIR.exists():
+        return {"batches": batches}
     for batch_dir in sorted(UPLOAD_DIR.iterdir(), reverse=True):
         batch_file = batch_dir / "batch.json"
-
         if batch_dir.is_dir() and batch_file.exists():
             try:
-                batches.append(
-                    json.loads(batch_file.read_text(encoding="utf-8"))
-                )
-            except json.JSONDecodeError:
-                logger.warning("Invalid batch file: %s", batch_file)
-
+                batches.append(json.loads(batch_file.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                logger.warning("Could not read batch metadata at %s", batch_file)
     return {"batches": batches}
 
 
-# --------------------------------------------------
-# AI DOCUMENT ANALYSIS
-# --------------------------------------------------
-
 @app.post("/api/analyze/{batch_id}")
 async def analyze_batch(batch_id: str):
+    batch_id = safe_batch_id(batch_id)
     batch_dir = UPLOAD_DIR / batch_id
-
-    if not batch_dir.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Batch not found."
-        )
+    if not batch_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Batch not found.")
 
     try:
-        # Implemented in services/ai_analyzer.py
         from services.ai_analyzer import analyze_batch_documents
+        from services.pipeline import validate_analysis_result
 
         result = await analyze_batch_documents(batch_dir)
-
+        result = validate_analysis_result(result)
+        result["batch_id"] = batch_id
+        result["approval_status"] = "pending_review"
         result_file = RESULT_DIR / f"{batch_id}.json"
-        result_file.write_text(
-            json.dumps(result, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-
-        return {
-            "message": "Analysis completed.",
-            "batch_id": batch_id,
-            "result": result
-        }
-
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="AI analyzer service has not been installed yet."
-        )
+        temp_file = result_file.with_suffix(".tmp")
+        temp_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_file.replace(result_file)
+        return {"message": "Analysis completed; human review is required.", "batch_id": batch_id, "result": result}
     except Exception as error:
-        logger.exception("Analysis failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Analysis failed: {str(error)}"
-        )
+        logger.exception("Analysis failed for batch %s", batch_id)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {error}")
 
-
-# --------------------------------------------------
-# REVIEW ANALYSIS
-# --------------------------------------------------
 
 @app.get("/api/results/{batch_id}")
 async def get_analysis_result(batch_id: str):
+    batch_id = safe_batch_id(batch_id)
     result_file = RESULT_DIR / f"{batch_id}.json"
+    if not result_file.is_file():
+        raise HTTPException(status_code=404, detail="Analysis result not found.")
+    try:
+        return json.loads(result_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Stored analysis result is invalid JSON.")
 
-    if not result_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Analysis result not found."
-        )
-
-    return json.loads(result_file.read_text(encoding="utf-8"))
-
-
-# --------------------------------------------------
-# APPROVE AND EXPORT
-# --------------------------------------------------
 
 @app.post("/api/approve/{batch_id}")
-async def approve_batch(batch_id: str):
+async def approve_batch(batch_id: str, request: Request):
+    batch_id = safe_batch_id(batch_id)
     result_file = RESULT_DIR / f"{batch_id}.json"
-
-    if not result_file.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="No analysis result available for approval."
-        )
+    if not result_file.is_file():
+        raise HTTPException(status_code=404, detail="No analysis result available.")
 
     try:
-        result = json.loads(
-            result_file.read_text(encoding="utf-8")
-        )
+        confirmation = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Approval confirmation is required.")
 
-        # Implemented in services/google_sheets.py
+    if confirmation.get("review_confirmed") is not True:
+        raise HTTPException(status_code=400, detail="Explicit human review confirmation is required.")
+
+    result = json.loads(result_file.read_text(encoding="utf-8"))
+    if result.get("overall_review_required") is not False:
+        raise HTTPException(status_code=409, detail="This batch still has unresolved review flags.")
+    if result.get("approval_status") == "exported":
+        raise HTTPException(status_code=409, detail="This batch has already been exported.")
+
+    result["approval_status"] = "approved"
+    result["approved_at"] = datetime.now(timezone.utc).isoformat()
+    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    try:
         from services.google_sheets import export_approved_batch
-
-        export_result = await export_approved_batch(
-            batch_id=batch_id,
-            result=result
-        )
-
-        return {
-            "message": "Approved batch exported.",
-            "batch_id": batch_id,
-            "export": export_result
-        }
-
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="Google Sheets service has not been installed yet."
-        )
+        export_result = await export_approved_batch(batch_id=batch_id, result=result)
+        result["approval_status"] = "exported"
+        result["export_result"] = export_result
+        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {"message": "Approved batch exported.", "batch_id": batch_id, "export": export_result}
     except Exception as error:
-        logger.exception("Export failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Export failed: {str(error)}"
-        )
+        logger.exception("Export failed for approved batch %s", batch_id)
+        result["export_error"] = str(error)
+        result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        raise HTTPException(status_code=502, detail=f"Approval saved, but export failed: {error}")
 
-
-# --------------------------------------------------
-# ROOT INFORMATION
-# --------------------------------------------------
 
 @app.get("/api")
 async def api_information():
     return {
-        "name": APP_NAME,
-        "version": APP_VERSION,
-        "workflow": [
-            "Upload driver PDFs",
-            "Group documents by driver",
-            "Extract PDF text and scanned pages",
-            "Analyze trips and reimbursements",
-            "Review extracted information",
-            "Approve results",
-            "Export to Google Sheets"
-        ]
+        "name": APP_NAME, "version": APP_VERSION,
+        "workflow": ["Upload PDFs", "Extract text and OCR", "Analyze documents",
+                     "Validate trip and reimbursement records", "Human review",
+                     "Approve and export"]
     }
-
-
-# --------------------------------------------------
-# STARTUP
-# --------------------------------------------------
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("%s started successfully.", APP_NAME)
