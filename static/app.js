@@ -8,506 +8,263 @@ const batchList = document.getElementById("batchList");
 const analysisResults = document.getElementById("analysisResults");
 const refreshButton = document.getElementById("refreshButton");
 const dropArea = document.getElementById("dropArea");
-
 let selectedPDFs = [];
-
-// --------------------------------------------------
-// GENERAL HELPERS
-// --------------------------------------------------
+let activeUploadBatchId = null;
+const UPLOAD_CHUNK_SIZE = 3;
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 function showMessage(element, message, type = "") {
     element.textContent = message;
     element.className = `message ${type}`;
 }
-
 function escapeHTML(value) {
     return String(value ?? "").replace(/[&<>"']/g, character => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     })[character]);
 }
-
 async function apiRequest(url, options = {}) {
     const response = await fetch(url, options);
-
     const data = await response.json().catch(() => ({}));
-
     if (!response.ok) {
-        throw new Error(
-            data.detail || `Request failed: ${response.status}`
-        );
+        const error = new Error(data.detail || `Request failed: ${response.status}`);
+        error.status = response.status;
+        throw error;
     }
-
     return data;
 }
-
-// --------------------------------------------------
-// SYSTEM STATUS
-// --------------------------------------------------
-
 async function checkSystem() {
     const statusText = document.getElementById("systemStatus");
     const dot = document.querySelector(".status-dot");
-
     try {
         const result = await apiRequest("/health");
-
-        statusText.textContent = result.status === "online"
-            ? "System Online"
-            : "System Unavailable";
-
-        dot.classList.toggle(
-            "online",
-            result.status === "online"
-        );
-
+        statusText.textContent = result.status === "online" ? "System Online" : "System Unavailable";
+        dot.classList.toggle("online", result.status === "online");
     } catch (error) {
         statusText.textContent = "Connection Error";
         dot.classList.remove("online");
     }
 }
-
-// --------------------------------------------------
-// FILE SELECTION
-// --------------------------------------------------
-
-selectButton.addEventListener("click", () => {
-    pdfInput.click();
-});
-
+selectButton.addEventListener("click", () => pdfInput.click());
 pdfInput.addEventListener("change", () => {
     addSelectedFiles(pdfInput.files);
+    pdfInput.value = "";
 });
-
 function addSelectedFiles(files) {
-    const incomingFiles = Array.from(files);
-
-    const validFiles = incomingFiles.filter(file =>
-        file.name.toLowerCase().endsWith(".pdf") &&
-        file.type === "application/pdf"
-    );
-
-    const invalidCount = incomingFiles.length - validFiles.length;
-
-    selectedPDFs = [
-        ...selectedPDFs,
-        ...validFiles
-    ];
-
-    if (invalidCount > 0) {
-        showMessage(
-            uploadMessage,
-            `${invalidCount} non-PDF file(s) were ignored.`,
-            "error"
-        );
-    } else {
-        showMessage(uploadMessage, "");
-    }
-
+    const incoming = Array.from(files);
+    const existing = new Set(selectedPDFs.map(file => `${file.name}:${file.size}:${file.lastModified}`));
+    incoming.forEach(file => {
+        if (!file.name.toLowerCase().endsWith(".pdf")) return;
+        if (file.size > MAX_FILE_SIZE) {
+            showMessage(uploadMessage, `${file.name} exceeds 50 MB and was skipped.`, "error");
+            return;
+        }
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        if (!existing.has(key)) selectedPDFs.push(file);
+    });
     renderSelectedFiles();
 }
-
 function renderSelectedFiles() {
     selectedFiles.innerHTML = "";
-
     selectedPDFs.forEach((file, index) => {
         const item = document.createElement("div");
         item.className = "file-item";
-
-        item.innerHTML = `
-            <span>${escapeHTML(file.name)}</span>
-            <span>${(file.size / 1024 / 1024).toFixed(2)} MB
-                <button type="button"
-                    class="action-button"
-                    data-remove="${index}">
-                    Remove
-                </button>
-            </span>
-        `;
-
+        item.innerHTML = `<span>${escapeHTML(file.name)}</span><span>${(file.size / 1024 / 1024).toFixed(2)} MB
+            <button type="button" class="action-button" data-remove="${index}">Remove</button></span>`;
         selectedFiles.appendChild(item);
     });
-
     uploadButton.disabled = selectedPDFs.length === 0;
+    uploadButton.textContent = selectedPDFs.length ? `Upload ${selectedPDFs.length} PDF(s)` : "Upload Documents";
 }
-
 selectedFiles.addEventListener("click", event => {
     const button = event.target.closest("[data-remove]");
-
     if (!button) return;
-
-    const index = Number(button.dataset.remove);
-
-    selectedPDFs.splice(index, 1);
-
+    selectedPDFs.splice(Number(button.dataset.remove), 1);
     renderSelectedFiles();
 });
-
-// --------------------------------------------------
-// DRAG AND DROP
-// --------------------------------------------------
-
-dropArea.addEventListener("dragover", event => {
-    event.preventDefault();
-    dropArea.classList.add("dragover");
-});
-
-dropArea.addEventListener("dragleave", () => {
-    dropArea.classList.remove("dragover");
-});
-
+dropArea.addEventListener("dragover", event => { event.preventDefault(); dropArea.classList.add("dragover"); });
+dropArea.addEventListener("dragleave", () => dropArea.classList.remove("dragover"));
 dropArea.addEventListener("drop", event => {
-    event.preventDefault();
-    dropArea.classList.remove("dragover");
-
-    addSelectedFiles(event.dataTransfer.files);
+    event.preventDefault(); dropArea.classList.remove("dragover"); addSelectedFiles(event.dataTransfer.files);
 });
-
-// --------------------------------------------------
-// UPLOAD
-// --------------------------------------------------
-
 uploadButton.addEventListener("click", uploadDocuments);
-
 async function uploadDocuments() {
-    if (selectedPDFs.length === 0) return;
-
-    const formData = new FormData();
-
-    selectedPDFs.forEach(file => {
-        formData.append("files", file);
-    });
-
+    if (!selectedPDFs.length) return;
+    const files = [...selectedPDFs];
+    let batchId = null, uploaded = 0;
     uploadButton.disabled = true;
-    uploadButton.textContent = "Uploading...";
-
     try {
-        const result = await apiRequest("/api/upload", {
-            method: "POST",
-            body: formData
-        });
-
-        showMessage(
-            uploadMessage,
-            `${result.document_count} PDF(s) uploaded successfully. Batch: ${result.batch_id}`,
-            "success"
-        );
-
-        selectedPDFs = [];
+        if (activeUploadBatchId) {
+            batchId = activeUploadBatchId;
+        } else {
+            uploadButton.textContent = "Preparing batch...";
+            const batch = await apiRequest("/api/batches", {method: "POST"});
+            batchId = batch.batch_id;
+            activeUploadBatchId = batchId;
+        }
+        for (let offset = 0; offset < files.length; offset += UPLOAD_CHUNK_SIZE) {
+            const chunk = files.slice(offset, offset + UPLOAD_CHUNK_SIZE);
+            const data = new FormData();
+            data.append("batch_id", batchId);
+            chunk.forEach(file => data.append("files", file));
+            uploadButton.textContent = `Uploading ${Math.min(offset + chunk.length, files.length)} / ${files.length}...`;
+            const result = await apiRequest("/api/upload", {method: "POST", body: data});
+            uploaded += result.uploaded_count || 0;
+            const rejectedNames = new Set((result.rejected_files || []).map(item => item.filename));
+            const completed = new Set(chunk.filter(file => !rejectedNames.has(file.name)));
+            selectedPDFs = selectedPDFs.filter(file => !completed.has(file));
+            renderSelectedFiles();
+            showMessage(uploadMessage, `Uploaded ${uploaded} of ${files.length} PDFs. Batch: ${batchId}`, "success");
+            if (result.rejected_files?.length) {
+                showMessage(uploadMessage, result.rejected_files.map(item => `${item.filename}: ${item.reason}`).join(" · "), "error");
+            }
+        }
+        if (selectedPDFs.length === 0) {
+            activeUploadBatchId = null;
+            showMessage(uploadMessage, `${uploaded} PDF(s) uploaded. Batch: ${batchId}`, "success");
+        } else {
+            showMessage(uploadMessage, `Some files were rejected. Review the errors and retry the remaining files in batch ${batchId}.`, "error");
+        }
         renderSelectedFiles();
-
         await loadBatches();
-
     } catch (error) {
-        showMessage(
-            uploadMessage,
-            error.message,
-            "error"
-        );
-
+        // Keep all files selected for a safe retry; server-side duplicate filenames
+        // are unique and will not overwrite earlier uploads.
+        activeUploadBatchId = batchId;
+        showMessage(uploadMessage, `Batch ${batchId || "not created"}: ${uploaded} PDF(s) uploaded. Retry will continue in the same batch. ${error.message}`, "error");
+        await loadBatches();
     } finally {
         uploadButton.disabled = selectedPDFs.length === 0;
-        uploadButton.textContent = "Upload Documents";
+        uploadButton.textContent = selectedPDFs.length ? `Retry upload (${selectedPDFs.length} selected)` : "Upload Documents";
     }
 }
-
-// --------------------------------------------------
-// BATCH INVENTORY
-// --------------------------------------------------
-
 refreshButton.addEventListener("click", loadBatches);
-
 async function loadBatches() {
-    batchList.innerHTML = `
-        <p class="empty-state">Loading batches...</p>
-    `;
-
+    batchList.innerHTML = `<p class="empty-state">Loading batches...</p>`;
     try {
         const result = await apiRequest("/api/batches");
-
         renderBatches(result.batches || []);
-
-        const batchCount = result.batches?.length || 0;
-
-        const documentCount = (result.batches || [])
-            .reduce((sum, batch) =>
-                sum + (batch.document_count || 0), 0
-            );
-
-        document.getElementById("batchCount").textContent =
-            batchCount;
-
-        document.getElementById("documentCount").textContent =
-            documentCount;
-
+        const batches = result.batches || [];
+        document.getElementById("batchCount").textContent = batches.length;
+        document.getElementById("documentCount").textContent = batches.reduce((sum, item) => sum + (item.document_count || 0), 0);
     } catch (error) {
-        batchList.innerHTML = `
-            <p class="empty-state">
-                ${escapeHTML(error.message)}
-            </p>
-        `;
+        batchList.innerHTML = `<p class="empty-state">${escapeHTML(error.message)}</p>`;
     }
 }
-
 function renderBatches(batches) {
     batchList.innerHTML = "";
-
-    if (batches.length === 0) {
-        batchList.innerHTML = `
-            <p class="empty-state">
-                No uploaded batches yet.
-            </p>
-        `;
-
-        return;
+    if (!batches.length) {
+        batchList.innerHTML = `<p class="empty-state">No uploaded batches yet.</p>`; return;
     }
-
     batches.forEach(batch => {
         const card = document.createElement("div");
         card.className = "batch-card";
-
-        const files = (batch.documents || [])
-            .map(file => escapeHTML(file.filename))
-            .join(", ");
-
-        card.innerHTML = `
-            <div class="batch-header">
-                <h3>Batch ${escapeHTML(batch.batch_id)}</h3>
-                <span class="badge warning">
-                    ${escapeHTML(batch.status)}
-                </span>
-            </div>
-
-            <p class="batch-meta">
-                ${batch.document_count} document(s)
-                · ${escapeHTML(batch.created_at)}
-            </p>
-
-            <p class="batch-meta">
-                ${files}
-            </p>
-
-            <div class="batch-actions">
-                <button class="action-button"
-                    data-analyze="${escapeHTML(batch.batch_id)}">
-                    Analyze Documents
-                </button>
-
-                <button class="action-button"
-                    data-results="${escapeHTML(batch.batch_id)}">
-                    View Results
-                </button>
-
-                <button class="action-button"
-                    data-approve="${escapeHTML(batch.batch_id)}">
-                    Approve & Export
-                </button>
-            </div>
-        `;
-
+        const files = (batch.documents || []).map(file => escapeHTML(file.filename)).join(", ");
+        card.innerHTML = `<div class="batch-header"><h3>Batch ${escapeHTML(batch.batch_id)}</h3>
+            <span class="badge warning">${escapeHTML(batch.status)}</span></div>
+            <p class="batch-meta">${batch.document_count} document(s) · ${escapeHTML(batch.created_at)}</p>
+            <p class="batch-meta">${files}</p><div class="batch-actions">
+            <button type="button" class="action-button" data-analyze="${escapeHTML(batch.batch_id)}">Analyze Documents</button>
+            <button type="button" class="action-button" data-results="${escapeHTML(batch.batch_id)}">View Results</button>
+            <button type="button" class="action-button" data-approve="${escapeHTML(batch.batch_id)}">Approve & Export</button></div>`;
         batchList.appendChild(card);
     });
 }
-
 batchList.addEventListener("click", async event => {
-    const analyzeButton = event.target.closest("[data-analyze]");
-    const resultsButton = event.target.closest("[data-results]");
-    const approveButton = event.target.closest("[data-approve]");
-
+    const a = event.target.closest("[data-analyze]");
+    const v = event.target.closest("[data-results]");
+    const p = event.target.closest("[data-approve]");
     try {
-        if (analyzeButton) {
-            await analyzeBatch(analyzeButton.dataset.analyze);
-        }
-
-        if (resultsButton) {
-            await loadResults(resultsButton.dataset.results);
-        }
-
-        if (approveButton) {
-            await approveBatch(approveButton.dataset.approve);
-        }
-
-    } catch (error) {
-        alert(error.message);
-    }
+        if (a) await analyzeBatch(a.dataset.analyze);
+        if (v) await loadResults(v.dataset.results);
+        if (p) await approveBatch(p.dataset.approve);
+    } catch (error) { alert(error.message); }
 });
-
-// --------------------------------------------------
-// AI ANALYSIS
-// --------------------------------------------------
-
-async function analyzeBatch(batchId) {
-    if (!confirm("Start AI analysis for this batch?")) {
-        return;
+async function analyzeBatch(id) {
+    if (!confirm("Start AI analysis for this batch?")) return;
+    analysisResults.innerHTML = `<p class="empty-state">Analysis queued. You can keep this page open; progress will be checked automatically...</p>`;
+    await apiRequest(`/api/analyze/${encodeURIComponent(id)}`, {method: "POST"});
+    for (let attempt = 0; attempt < 1800; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const status = await apiRequest(`/api/analyze/${encodeURIComponent(id)}/status`);
+        if (status.status === "completed") {
+            await loadResults(id);
+            alert("Analysis completed. Review the results carefully.");
+            return;
+        }
+        if (status.status === "failed") {
+            throw new Error(`Analysis failed: ${status.message || "Unknown error"}`);
+        }
+        analysisResults.innerHTML = `<p class="empty-state">${escapeHTML(status.message || "Analysis is processing...")} Status: ${escapeHTML(status.status)}. Keep this page open or return to this batch later.</p>`;
     }
-
-    analysisResults.innerHTML = `
-        <p class="empty-state">
-            AI analysis is running. Please wait...
-        </p>
-    `;
-
-    const result = await apiRequest(
-        `/api/analyze/${encodeURIComponent(batchId)}`,
-        { method: "POST" }
-    );
-
-    renderAnalysis(result.result);
-
-    alert("Analysis completed. Review the results carefully.");
+    throw new Error("Analysis is taking longer than expected. The job may still be running; use View Results after it completes.");
 }
-
-// --------------------------------------------------
-// DISPLAY ANALYSIS
-// --------------------------------------------------
-
-async function loadResults(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
-    renderAnalysis(result);
+async function loadResults(id) {
+    analysisResults.innerHTML = `<p class="empty-state">Loading results for batch ${escapeHTML(id)}...</p>`;
+    analysisResults.scrollIntoView({behavior: "smooth", block: "start"});
+    try {
+        const result = await apiRequest(`/api/results/${encodeURIComponent(id)}`);
+        if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("The server returned an unexpected results format.");
+        renderAnalysis(result);
+    } catch (error) {
+        if (error.status === 404) {
+            try {
+                const status = await apiRequest(`/api/analyze/${encodeURIComponent(id)}/status`);
+                if (status.status === "processing" || status.status === "queued") throw new Error("Analysis is still processing. Wait for it to finish, then select View Results again.");
+                if (status.status === "failed") throw new Error(`Analysis failed: ${status.message || "No result file was created."}`);
+            } catch (statusError) {
+                if (statusError.status !== 404) throw statusError;
+            }
+            throw new Error("No saved analysis results exist for this batch yet. Select Analyze Documents first.");
+        }
+        throw error;
+    }
 }
-
 function renderAnalysis(result) {
-    const trips = result.trips || [];
-    const tolls = result.toll_reimbursements || [];
-    const parking = result.parking_reimbursements || [];
-
-    const driverName = result.driver?.name || "Unidentified";
-
-    let html = `
-        <div class="result-section">
-            <h3>Driver Information</h3>
-            <div class="result-item">
-                <p><strong>Driver:</strong>
-                    ${escapeHTML(driverName)}
-                </p>
-                <p><strong>Documents:</strong>
-                    ${result.documents_processed || 0}
-                </p>
-                <p><strong>Approval:</strong>
-                    ${escapeHTML(result.approval_status || "pending_review")}
-                </p>
-            </div>
-        </div>
-
-        <div class="result-section">
-            <h3>Trip Records (${trips.length})</h3>
-    `;
-
-    trips.forEach((trip, index) => {
-        html += `
-            <div class="result-item">
-                <p><strong>Trip ${index + 1}</strong></p>
-                <p>Date: ${escapeHTML(trip.trip_date)}</p>
-                <p>Trip Ticket: ${escapeHTML(trip.trip_ticket_number)}</p>
-                <p>Line Haul: ${escapeHTML(trip.line_haul_trip_number)}</p>
-                <p>Origin: ${escapeHTML(trip.origin)}</p>
-                <p>Destination: ${escapeHTML(trip.destination)}</p>
-                <p>Segments: ${(trip.segments || []).length}</p>
-                <p>Review Flags:
-                    ${escapeHTML((trip.review_flags || []).join("; ") || "None")}
-                </p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Toll Reimbursements (${tolls.length})</h3>
-    `;
-
-    tolls.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Parking Reimbursements (${parking.length})</h3>
-    `;
-
-    parking.forEach(record => {
-        html += `
-            <div class="result-item">
-                <p>Date: ${escapeHTML(record.date)}</p>
-                <p>Location: ${escapeHTML(record.location)}</p>
-                <p>Amount: ${escapeHTML(record.amount)}</p>
-            </div>
-        `;
-    });
-
-    html += `
-        </div>
-        <div class="result-section">
-            <h3>Unresolved Items</h3>
-            <div class="result-item">
-                ${escapeHTML(
-                    (result.unresolved_items || []).join("; ") ||
-                    "No unresolved items reported."
-                )}
-            </div>
-        </div>
-    `;
-
+    const trips = Array.isArray(result.trips) ? result.trips : [];
+    const tolls = Array.isArray(result.toll_reimbursements) ? result.toll_reimbursements : [];
+    const parking = Array.isArray(result.parking_reimbursements) ? result.parking_reimbursements : [];
+    const groups = Array.isArray(result.driver_groups) ? result.driver_groups : [];
+    let html = `<div class="result-section"><h3>Batch Overview</h3><div class="result-item">
+        <p><strong>Drivers identified:</strong> ${groups.length}</p>
+        <p><strong>Documents:</strong> ${result.documents_processed || 0} / ${result.documents_received || result.documents_processed || 0}</p>
+        <p><strong>Approval:</strong> ${escapeHTML(result.approval_status || "pending_review")}</p>
+        <p><strong>Review required:</strong> ${result.overall_review_required ? "Yes" : "No"}</p></div></div>`;
+    if (groups.length) {
+        html += `<div class="result-section"><h3>Driver Packages</h3>`;
+        groups.forEach(group => {
+            html += `<div class="result-item"><p><strong>${escapeHTML(group.driver?.name || "Unidentified")}</strong></p>
+                <p>${group.document_count || 0} document(s) · ${(group.trips || []).length} trip(s) ·
+                ${(group.toll_reimbursements || []).length} toll record(s) ·
+                ${(group.parking_reimbursements || []).length} parking record(s)</p>
+                <p>Review: ${group.overall_review_required ? "Required" : "Ready for verification"}</p></div>`;
+        });
+        html += `</div>`;
+    }
+    html += `<div class="result-section"><h3>Trip Records (${trips.length})</h3>`;
+    trips.forEach((trip, i) => { html += `<div class="result-item"><p><strong>Trip ${i+1}</strong></p>
+        <p>Date: ${escapeHTML(trip.trip_date)}</p><p>Trip Ticket: ${escapeHTML(trip.trip_ticket_number)}</p>
+        <p>Line Haul: ${escapeHTML(trip.line_haul_trip_number)}</p><p>Origin: ${escapeHTML(trip.origin)}</p>
+        <p>Destination: ${escapeHTML(trip.destination)}</p><p>Segments: ${(trip.segments || []).length}</p>
+        <p>Review Flags: ${escapeHTML((trip.review_flags || []).join("; ") || "None")}</p></div>`; });
+    html += `</div><div class="result-section"><h3>Toll Reimbursements (${tolls.length})</h3>`;
+    tolls.forEach(row => { html += `<div class="result-item"><p>Date: ${escapeHTML(row.date)}</p><p>Location: ${escapeHTML(row.location)}</p><p>Amount: ${escapeHTML(row.amount)}</p></div>`; });
+    html += `</div><div class="result-section"><h3>Parking Reimbursements (${parking.length})</h3>`;
+    parking.forEach(row => { html += `<div class="result-item"><p>Date: ${escapeHTML(row.date)}</p><p>Location: ${escapeHTML(row.location)}</p><p>Amount: ${escapeHTML(row.amount)}</p></div>`; });
+    html += `</div><div class="result-section"><h3>Unresolved Items</h3><div class="result-item">${escapeHTML((result.unresolved_items || []).join("; ") || "No unresolved items reported.")}</div></div>`;
     analysisResults.innerHTML = html;
 }
-
-// --------------------------------------------------
-// APPROVAL AND EXPORT
-// --------------------------------------------------
-
-async function approveBatch(batchId) {
-    const result = await apiRequest(
-        `/api/results/${encodeURIComponent(batchId)}`
-    );
-
+async function approveBatch(id) {
+    const result = await apiRequest(`/api/results/${encodeURIComponent(id)}`);
     if (result.overall_review_required !== false) {
-        alert(
-            "This batch still requires review. " +
-            "The system will not approve it automatically."
-        );
-
-        return;
+        alert("This batch still requires review. Resolve all flagged items before export."); return;
     }
-
-    if (!confirm(
-        "Have you reviewed this batch and verified all records? " +
-        "Approval will export the data to Google Sheets."
-    )) {
-        return;
-    }
-
+    if (!confirm("Have you reviewed and verified every record? Approval will export to Google Sheets.")) return;
     result.approval_status = "approved";
-
-    // The backend must also persist this approval state
-    // before export. The current starter endpoint does not
-    // yet provide that operation, so export remains blocked
-    // until the approval API is implemented.
-    alert(
-        "Approval workflow is not yet enabled. " +
-        "Backend approval persistence must be implemented first."
-    );
+    await apiRequest(`/api/results/${encodeURIComponent(id)}`, {
+        method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(result)
+    });
+    const exported = await apiRequest(`/api/approve/${encodeURIComponent(id)}`, {method: "POST"});
+    alert(exported.message || "Export completed.");
 }
-
-// --------------------------------------------------
-// INITIALIZATION
-// --------------------------------------------------
-
-async function initializeDashboard() {
-    await checkSystem();
-    await loadBatches();
-}
-
+async function initializeDashboard() { await Promise.all([checkSystem(), loadBatches()]); }
 initializeDashboard();
