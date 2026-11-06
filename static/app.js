@@ -445,14 +445,19 @@ function renderAnalysis(result, batchId) {
             });
             html += '</div>';
             if (row.segments && row.segments.length) {
-                html += '<p><strong>Movement evidence (read-only):</strong></p><ul>';
-                row.segments.forEach(segment => {
-                    html += '<li>' + escapeHTML(segment.origin || "Unknown") + ' → ' +
-                        escapeHTML(segment.destination || "Unknown") + ' · ' +
-                        escapeHTML(segment.departure_time || segment.arrival_time || "Time not captured") +
-                        ' · ' + escapeHTML(segment.movement_type || "unclassified") + '</li>';
+                html += '<p><strong>Movement rows (edit route and times):</strong></p><div class="movement-list">';
+                row.segments.forEach((segment, segmentIndex) => {
+                    html += '<div class="movement-row"><strong>Movement ' + (segmentIndex + 1) +
+                        ' · ' + escapeHTML(segment.movement_type || "unclassified") + '</strong><div class="review-grid">';
+                    [["origin","From"],["destination","To"],["departure_time","Departure time"],["arrival_time","Arrival time"]].forEach(pair => {
+                        html += '<label class="review-field"><span>' + pair[1] + '</span><input type="text" ' +
+                            'data-segment-index="' + segmentIndex + '" data-review-section="trips" ' +
+                            'data-review-index="' + index + '" data-review-field="segments.' + pair[0] + '" ' +
+                            'value="' + escapeHTML(segment[pair[0]] || "") + '"></label>';
+                    });
+                    html += '</div></div>';
                 });
-                html += '</ul>';
+                html += '</div>';
             }
             html += '<p class="review-flags"><strong>Review flags:</strong> ' +
                 escapeHTML((row.review_flags || []).join("; ") || "None reported") + '</p></div>';
@@ -489,9 +494,15 @@ async function saveReviewEdits() {
             const index = Number(input.dataset.reviewIndex);
             const field = input.dataset.reviewField;
             const value = input.value.trim();
-            updated[section][index][field] = section === "trips" && field === "drop_offs"
-                ? (value ? value.split(",").map(part => part.trim()).filter(Boolean) : [])
-                : (value || null);
+            if (field.startsWith("segments.")) {
+                const segmentField = field.split(".")[1];
+                const segmentIndex = Number(input.dataset.segmentIndex);
+                updated.trips[index].segments[segmentIndex][segmentField] = value || null;
+            } else {
+                updated[section][index][field] = section === "trips" && field === "drop_offs"
+                    ? (value ? value.split(",").map(part => part.trim()).filter(Boolean) : [])
+                    : (value || null);
+            }
         });
         const response = await apiRequest("/api/review/" + encodeURIComponent(activeReviewBatchId), {
             method: "PUT",

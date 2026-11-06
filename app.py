@@ -340,7 +340,7 @@ async def save_review(batch_id: str, request: Request):
             "plate_no", "fleet_type", "check_in_time_actual", "valid_time_circled",
             "docking_time", "docking_date_or_check_out_date", "check_out_time",
             "origin", "drop_offs", "destination", "with_backload",
-            "demurrage_availment", "remarks", "late"},
+            "demurrage_availment", "remarks", "late", "segments"},
         "toll_reimbursements": {"date", "line_haul_trip_number", "driver_id", "driver_name",
             "plate_no", "fleet_type", "origin", "destination", "rfid_toll_charges",
             "entry_point", "exit_point", "date_of_or", "tag_number", "amount"},
@@ -363,8 +363,20 @@ async def save_review(batch_id: str, request: Request):
                 if field in row:
                     value = row[field]
                     if field == "drop_offs":
-                        if not isinstance(value, list):
-                            raise HTTPException(status_code=400, detail="drop_offs must be a list.")
+                        if not isinstance(value, list) or not all(isinstance(part, str) for part in value):
+                            raise HTTPException(status_code=400, detail="drop_offs must be a list of text values.")
+                    elif field == "segments":
+                        if not isinstance(value, list) or not all(isinstance(segment, dict) for segment in value):
+                            raise HTTPException(status_code=400, detail="segments must be a list of movement objects.")
+                        existing_segments = current[section][index].get("segments", [])
+                        if len(value) != len(existing_segments):
+                            raise HTTPException(status_code=400, detail="Movement row count cannot be changed in review.")
+                        for segment_index, segment in enumerate(value):
+                            for segment_field in ("origin", "destination", "departure_time", "arrival_time"):
+                                segment_value = segment.get(segment_field)
+                                if segment_value is not None and not isinstance(segment_value, str):
+                                    raise HTTPException(status_code=400, detail=f"Invalid movement field: {segment_field}.")
+                                existing_segments[segment_index][segment_field] = segment_value
                     elif value is not None and not isinstance(value, (str, int, float, bool)):
                         raise HTTPException(status_code=400, detail=f"Invalid value for {field}.")
                     current[section][index][field] = value

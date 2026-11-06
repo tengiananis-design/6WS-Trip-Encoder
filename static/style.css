@@ -393,3 +393,7 @@ footer {
 }
 .review-flags { color: var(--warning); margin-top: 12px !important; }
 @media (max-width: 700px) { .review-grid { grid-template-columns: 1fr; } }
+
+.movement-list { display: grid; gap: 10px; margin: 10px 0; }
+.movement-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.movement-row > strong { display: block; margin-bottom: 8px; font-size: 12px; }

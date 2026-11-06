@@ -206,6 +206,14 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
 
     driver_results = []
     for key, bucket in sorted(by_driver.items()):
+        driver_info = bucket["driver"] if isinstance(bucket["driver"], dict) else {"name": bucket["driver"]}
+        for trip in bucket["trips"]:
+            trip.setdefault("driver_name", driver_info.get("name"))
+            trip.setdefault("driver_id", driver_info.get("id"))
+        for category in ("toll_reimbursements", "parking_reimbursements", "passway_reimbursements"):
+            for record in bucket[category]:
+                record.setdefault("driver_name", driver_info.get("name"))
+                record.setdefault("driver_id", driver_info.get("id"))
         trip_result = process_all_trips({"driver": bucket["driver"], "trips": bucket["trips"]})
         expense_result = process_reimbursements({
             "driver": bucket["driver"],
