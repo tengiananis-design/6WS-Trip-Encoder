@@ -13,7 +13,7 @@ from google.genai import types
 from services.ocr_engine import extract_complete_pdf
 
 logger = logging.getLogger(__name__)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 EXTRACTION_WORKERS = max(1, min(int(os.getenv("PDF_EXTRACTION_WORKERS", "4")), 8))
 _client = None
 
@@ -145,7 +145,7 @@ async def analyze_batch_documents(batch_dir: str | Path) -> dict[str, Any]:
 
     for (path, original_name), result in zip(pdf_records, results):
         if isinstance(result, Exception):
-            logger.exception("Failed to extract %s", original_name, exc_info=result)
+            logger.error("Failed to extract %s: %s", original_name, result)
             extraction_errors.append({"filename": original_name, "error": str(result)})
         else:
             extracted_documents.append(result)
