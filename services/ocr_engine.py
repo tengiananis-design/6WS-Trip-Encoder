@@ -164,12 +164,15 @@ def extract_complete_pdf(
         if page.get("requires_ocr"):
             ocr_result = ocr_by_page.get(page_number, {})
 
+            original_text = str(page.get("text") or "").strip()
+            ocr_text = str(ocr_result.get("text") or "").strip()
+            combined_text = "\\n".join(value for value in (original_text, ocr_text) if value)
             final_pages.append({
                 "page_number": page_number,
-                "text": ocr_result.get("text", ""),
-                "source": "ocr",
-                "status": ocr_result.get("status", "failed"),
-                "error": ocr_result.get("error")
+                "text": combined_text,
+                "source": "digital+ocr" if original_text and ocr_text else ("ocr" if ocr_text else "digital"),
+                "status": "completed" if combined_text else ocr_result.get("status", "failed"),
+                "error": ocr_result.get("error") if not ocr_text else None
             })
 
         else:
