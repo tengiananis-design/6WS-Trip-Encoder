@@ -19,7 +19,7 @@ class DocumentIdentificationBatchTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_generate_json(prompt):
             import json
-            payload = prompt.split("Documents:\\n", 1)[1]
+            payload = prompt.split("Documents:" + chr(10), 1)[1]
             items = json.loads(payload)
             call_sizes.append(len(items))
             return {
