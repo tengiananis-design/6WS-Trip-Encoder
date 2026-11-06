@@ -166,7 +166,7 @@ def extract_complete_pdf(
 
             original_text = str(page.get("text") or "").strip()
             ocr_text = str(ocr_result.get("text") or "").strip()
-            combined_text = "\\n".join(value for value in (original_text, ocr_text) if value)
+            combined_text = "\n".join(value for value in (original_text, ocr_text) if value)
             final_pages.append({
                 "page_number": page_number,
                 "text": combined_text,
