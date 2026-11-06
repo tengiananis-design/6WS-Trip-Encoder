@@ -89,6 +89,18 @@ class TripRuleTests(unittest.TestCase):
         self.assertEqual(trip["source_references"], [reference])
         self.assertEqual(trip["segments"][0]["source_references"], [reference])
 
+    def test_missing_trip_date_and_line_haul_number_require_review(self):
+        trip = process_trip({
+            "segments": [{
+                "origin": "SOC 6",
+                "destination": "MFM Pulilan",
+                "source_references": [{"filename": "trip.pdf", "page_number": 1}],
+            }],
+            "source_references": [{"filename": "trip.pdf", "page_number": 1}],
+        })
+        self.assertTrue(any("Trip date is missing" in flag for flag in trip["review_flags"]))
+        self.assertTrue(any("Line Haul Trip No." in flag for flag in trip["review_flags"]))
+
 
 class ReimbursementTests(unittest.TestCase):
     def test_amount_normalization(self):
