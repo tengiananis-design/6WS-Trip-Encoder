@@ -236,11 +236,22 @@ async def save_driver_assignments(batch_id: str, request: Request):
     result_key = f"results/{batch_id}.json"
     if (RESULT_DIR / f"{batch_id}.json").is_file() or (storage.shared_storage_enabled() and storage.exists(result_key)):
         raise HTTPException(status_code=409, detail="This batch has already been analyzed. Manual assignments must be saved before analysis.")
+    from services.job_store import read_job
+    local_job = read_job(batch_dir)
+    if local_job and local_job.get("status") in ("queued", "processing"):
+        raise HTTPException(status_code=409, detail="Analysis has already started. Driver assignments can no longer be changed.")
+    jobs_key = f"jobs/{batch_id}.json"
+    if storage.shared_storage_enabled() and storage.exists(jobs_key):
+        shared_job = storage.load_json(jobs_key)
+        if shared_job.get("status") in ("queued", "processing"):
+            raise HTTPException(status_code=409, detail="Analysis has already started. Driver assignments can no longer be changed.")
 
     try:
         payload = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="An assignments object is required.")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="The request body must be a JSON object.")
     assignments = payload.get("assignments")
     if not isinstance(assignments, dict):
         raise HTTPException(status_code=400, detail="assignments must be a filename-to-driver-name object.")
@@ -250,6 +261,8 @@ async def save_driver_assignments(batch_id: str, request: Request):
     for filename, driver_name in assignments.items():
         if filename not in allowed_files:
             raise HTTPException(status_code=400, detail=f"Unknown uploaded filename: {filename}")
+        if not isinstance(driver_name, str) or len(driver_name) > 200:
+            raise HTTPException(status_code=400, detail=f"Invalid driver name for {filename}.")
         name = normalize_driver_name(driver_name)
         if not name:
             raise HTTPException(status_code=400, detail=f"A driver name is required for {filename}.")
