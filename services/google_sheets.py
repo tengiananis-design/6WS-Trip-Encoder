@@ -62,13 +62,13 @@ def prepare_trip_rows(result: dict) -> list[list[Any]]:
 
 
 def prepare_reimbursement_rows(records: list[dict], driver_name: str) -> list[list[Any]]:
-    return [[driver_name, record.get("date"), record.get("location"), record.get("amount"),
+    return [[record.get("driver_name") or driver_name, record.get("date"), record.get("location"), record.get("amount"),
              record.get("receipt_reference"), ",".join(str(p) for p in record.get("source_pages", [])),
              "APPROVED"] for record in records]
 
 
 async def export_approved_batch(batch_id: str, result: dict) -> dict:
-    if result.get("approval_status") != "approved":
+    if result.get("approval_status") not in ("approved", "exporting"):
         raise ValueError("Batch must be approved before export.")
     service = get_sheets_service()
     driver_name = result.get("driver", {}).get("name") or "MULTIPLE / SEE ROW DRIVER"
