@@ -73,6 +73,7 @@ def normalize_expense(
         "source_pages": expense.get(
             "source_pages", []
         ),
+        "source_references": expense.get("source_references", []),
         "review_flags": list(dict.fromkeys(review_flags)),
         "status": (
             "review_required"
