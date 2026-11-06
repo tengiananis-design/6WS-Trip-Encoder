@@ -76,6 +76,19 @@ class TripRuleTests(unittest.TestCase):
         self.assertEqual(trip["segments"][0]["departure_time"], "06:00")
         self.assertEqual(trip["segments"][1]["departure_time"], "10:00")
 
+    def test_source_filename_and_page_references_are_preserved(self):
+        reference = {"filename": "trip-ticket.pdf", "page_number": 3, "fact": "SOC 6 departure"}
+        trip = process_trip({
+            "source_references": [reference],
+            "segments": [{
+                "origin": "SOC 6",
+                "destination": "MFM Pulilan",
+                "source_references": [reference],
+            }],
+        })
+        self.assertEqual(trip["source_references"], [reference])
+        self.assertEqual(trip["segments"][0]["source_references"], [reference])
+
 
 class ReimbursementTests(unittest.TestCase):
     def test_amount_normalization(self):
