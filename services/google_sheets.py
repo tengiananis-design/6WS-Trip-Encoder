@@ -131,6 +131,17 @@ def _ensure_ledger_sheet(service, sheet_ids: dict[str, int]) -> dict[str, int]:
             body={"requests": [{"addSheet": {"properties": {"title": EXPORT_LEDGER_SHEET}}}]}
         ).execute()
         sheet_ids = _sheet_ids(service)
+    header = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{EXPORT_LEDGER_SHEET}'!A1:G1"
+    ).execute().get("values", [])
+    if not header:
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"'{EXPORT_LEDGER_SHEET}'!A1:G1",
+            valueInputOption="RAW",
+            body={"values": [["Batch ID", "Exported At (UTC)", "Driver", "Trip Rows", "Toll Rows", "Parking Rows", "Status"]]}
+        ).execute()
     return sheet_ids
 
 
