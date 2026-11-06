@@ -5,7 +5,7 @@ from unittest.mock import patch
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app import DashboardAuthMiddleware
+from app import DashboardAuthMiddleware, normalize_manual_driver_name
 
 
 class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +40,9 @@ class DashboardAuthTests(unittest.IsolatedAsyncioTestCase):
             self.make_request(path, authorization), call_next
         )
         return response, called["next"]
+
+    def test_manual_driver_name_whitespace_is_normalized(self):
+        self.assertEqual(normalize_manual_driver_name("  Amado   B   Canar  "), "Amado B Canar")
 
     async def test_missing_credentials_fail_closed(self):
         with patch.dict(os.environ, {}, clear=True):

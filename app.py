@@ -79,6 +79,10 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_manual_driver_name(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
+
+
 def atomic_json(path: Path, value: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -447,7 +451,7 @@ async def assign_document_driver(batch_id: str, request: Request):
     if target is None:
         raise HTTPException(status_code=404, detail="PDF is not part of this analyzed batch.")
 
-    clean_name = re.sub(r"\\s+", " ", driver_name.strip())
+    clean_name = normalize_manual_driver_name(driver_name)
     previous_driver = target.get("driver") or {}
     if isinstance(previous_driver, dict):
         target["original_driver"] = target.get("original_driver") or previous_driver
