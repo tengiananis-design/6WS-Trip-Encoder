@@ -144,8 +144,9 @@ def _limit_page_text(pages: list[dict]) -> list[dict]:
     return limited
 
 
-async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None) -> dict[str, Any]:
+async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None, manual_assignments: dict | None = None) -> dict[str, Any]:
     batch_dir = Path(batch_dir)
+    manual_assignments = manual_assignments or {}
     pdf_files = sorted(path for path in batch_dir.glob("*.pdf") if path.is_file())
     if not pdf_files:
         raise ValueError("No PDF documents found in this batch.")
@@ -190,6 +191,23 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             driver = analysis.get("driver") or {}
             document["driver"] = driver
             document["driver_name"] = driver.get("name")
+            from services.driver_grouping import normalize_driver_name
+            assigned_name = normalize_driver_name(manual_assignments.get(pdf_path.name))
+            extracted_name = normalize_driver_name(driver.get("name"))
+            if assigned_name and not extracted_name:
+                document["driver"] = {
+                    "name": assigned_name,
+                    "confidence": "high",
+                    "evidence": [{"filename": pdf_path.name, "source": "user_manual_assignment"}]
+                }
+                document["driver_name"] = assigned_name
+                document["driver_assignment_source"] = "manual"
+                document["driver_assignment_status"] = "user_confirmed"
+            elif assigned_name and extracted_name and assigned_name != extracted_name:
+                document["driver_assignment_conflict"] = {
+                    "assigned_driver": assigned_name,
+                    "extracted_driver": extracted_name
+                }
             per_document_analyses.append({"document": document, "analysis": analysis})
             if progress_callback:
                 progress_callback(file_index, total_files, pdf_path.name)
@@ -214,14 +232,17 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
         driver_name = group["driver_name"]
         group_docs = group["documents"]
         confidences = [
-            (analyses_by_filename[d["filename"]].get("driver") or {}).get("confidence", "unknown")
+            (d.get("driver") or {}).get("confidence", "unknown")
             for d in group_docs
         ]
         evidence = [
             item
             for d in group_docs
-            for item in ((analyses_by_filename[d["filename"]].get("driver") or {}).get("evidence") or [])
+            for item in ((d.get("driver") or {}).get("evidence") or [])
         ]
+        all_manually_assigned = bool(group_docs) and all(
+            d.get("driver_assignment_source") == "manual" for d in group_docs
+        )
         confidence = (
             "high" if confidences and all(value in ("high", "verified") for value in confidences)
             else "low" if any(value in ("low", "unknown", None) for value in confidences)
@@ -238,15 +259,22 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             returned_name = returned_driver.get("name")
             returned_confidence = returned_driver.get("confidence", "unknown")
             from services.driver_grouping import normalize_driver_name
-            if not returned_name or normalize_driver_name(returned_name) != driver_name:
+            if returned_name and normalize_driver_name(returned_name) != driver_name:
                 confidence = "low"
                 unresolved.append({
                     "type": "driver_identity_conflict",
                     "driver_group": driver_name,
                     "group_analysis_driver": returned_name,
-                    "message": "Combined document analysis did not independently confirm the grouped driver identity; verify before approval."
+                    "message": "Combined document analysis returned a different driver identity; verify before approval."
                 })
-            elif returned_confidence not in ("high", "verified"):
+            elif not returned_name and not all_manually_assigned:
+                confidence = "low"
+                unresolved.append({
+                    "type": "driver_identity_not_reconfirmed",
+                    "driver_group": driver_name,
+                    "message": "Combined document analysis did not independently confirm this driver group."
+                })
+            elif returned_confidence not in ("high", "verified") and not all_manually_assigned:
                 confidence = "low" if returned_confidence in ("low", "unknown", None) else "medium"
                 unresolved.append({
                     "type": "driver_group_confidence_low",
@@ -304,7 +332,7 @@ async def analyze_batch_documents(batch_dir: str | Path, progress_callback=None)
             "evidence": [e for g in groups for e in g["driver"]["evidence"]]
         },
         "driver_groups": groups,
-        "documents": [{"filename": d["filename"], "document_type": d.get("document_type"), "driver_name": d.get("driver_name"), "total_pages": d.get("total_pages"), "extraction_status": d.get("extraction_status")} for d in extracted_documents],
+        "documents": [{"filename": d["filename"], "document_type": d.get("document_type"), "driver_name": d.get("driver_name"), "driver_assignment_source": d.get("driver_assignment_source"), "driver_assignment_status": d.get("driver_assignment_status"), "driver_assignment_conflict": d.get("driver_assignment_conflict"), "total_pages": d.get("total_pages"), "extraction_status": d.get("extraction_status")} for d in extracted_documents],
         "documents_processed": len(extracted_documents),
         "trips": all_trips,
         "toll_reimbursements": all_tolls,
