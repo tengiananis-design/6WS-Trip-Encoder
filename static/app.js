@@ -187,11 +187,24 @@ async function loadResults(id) {
 }
 function renderAnalysis(result) {
     const trips = result.trips || [], tolls = result.toll_reimbursements || [], parking = result.parking_reimbursements || [];
-    let html = `<div class="result-section"><h3>Driver Information</h3><div class="result-item">
-        <p><strong>Driver:</strong> ${escapeHTML(result.driver?.name || "Unidentified")}</p>
+    const groups = result.driver_groups || [];
+    let html = `<div class="result-section"><h3>Batch Overview</h3><div class="result-item">
+        <p><strong>Drivers identified:</strong> ${groups.length}</p>
         <p><strong>Documents:</strong> ${result.documents_processed || 0} / ${result.documents_received || result.documents_processed || 0}</p>
-        <p><strong>Approval:</strong> ${escapeHTML(result.approval_status || "pending_review")}</p></div></div>
-        <div class="result-section"><h3>Trip Records (${trips.length})</h3>`;
+        <p><strong>Approval:</strong> ${escapeHTML(result.approval_status || "pending_review")}</p>
+        <p><strong>Review required:</strong> ${result.overall_review_required ? "Yes" : "No"}</p></div></div>`;
+    if (groups.length) {
+        html += `<div class="result-section"><h3>Driver Packages</h3>`;
+        groups.forEach(group => {
+            html += `<div class="result-item"><p><strong>${escapeHTML(group.driver?.name || "Unidentified")}</strong></p>
+                <p>${group.document_count || 0} document(s) · ${(group.trips || []).length} trip(s) ·
+                ${(group.toll_reimbursements || []).length} toll record(s) ·
+                ${(group.parking_reimbursements || []).length} parking record(s)</p>
+                <p>Review: ${group.overall_review_required ? "Required" : "Ready for verification"}</p></div>`;
+        });
+        html += `</div>`;
+    }
+    html += `<div class="result-section"><h3>Trip Records (${trips.length})</h3>`;
     trips.forEach((trip, i) => { html += `<div class="result-item"><p><strong>Trip ${i+1}</strong></p>
         <p>Date: ${escapeHTML(trip.trip_date)}</p><p>Trip Ticket: ${escapeHTML(trip.trip_ticket_number)}</p>
         <p>Line Haul: ${escapeHTML(trip.line_haul_trip_number)}</p><p>Origin: ${escapeHTML(trip.origin)}</p>
