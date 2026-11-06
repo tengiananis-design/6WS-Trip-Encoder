@@ -159,9 +159,9 @@ function renderBatches(batches) {
             <span class="badge warning">${escapeHTML(batch.status)}</span></div>
             <p class="batch-meta">${batch.document_count} document(s) · ${escapeHTML(batch.created_at)}</p>
             <p class="batch-meta">${files}</p><div class="batch-actions">
-            <button class="action-button" data-analyze="${escapeHTML(batch.batch_id)}">Analyze Documents</button>
-            <button class="action-button" data-results="${escapeHTML(batch.batch_id)}">View Results</button>
-            <button class="action-button" data-approve="${escapeHTML(batch.batch_id)}">Approve & Export</button></div>`;
+            <button type="button" class="action-button" data-analyze="${escapeHTML(batch.batch_id)}">Analyze Documents</button>
+            <button type="button" class="action-button" data-results="${escapeHTML(batch.batch_id)}">View Results</button>
+            <button type="button" class="action-button" data-approve="${escapeHTML(batch.batch_id)}">Approve & Export</button></div>`;
         batchList.appendChild(card);
     });
 }
@@ -195,11 +195,31 @@ async function analyzeBatch(id) {
     throw new Error("Analysis is taking longer than expected. The job may still be running; use View Results after it completes.");
 }
 async function loadResults(id) {
-    renderAnalysis(await apiRequest(`/api/results/${encodeURIComponent(id)}`));
+    analysisResults.innerHTML = `<p class="empty-state">Loading results for batch ${escapeHTML(id)}...</p>`;
+    analysisResults.scrollIntoView({behavior: "smooth", block: "start"});
+    try {
+        const result = await apiRequest(`/api/results/${encodeURIComponent(id)}`);
+        if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("The server returned an unexpected results format.");
+        renderAnalysis(result);
+    } catch (error) {
+        if (error.message.includes("404")) {
+            try {
+                const status = await apiRequest(`/api/analyze/${encodeURIComponent(id)}/status`);
+                if (status.status === "processing" || status.status === "queued") throw new Error("Analysis is still processing. Wait for it to finish, then select View Results again.");
+                if (status.status === "failed") throw new Error(`Analysis failed: ${status.message || "No result file was created."}`);
+            } catch (statusError) {
+                if (!statusError.message.includes("404")) throw statusError;
+            }
+            throw new Error("No saved analysis results exist for this batch yet. Select Analyze Documents first.");
+        }
+        throw error;
+    }
 }
 function renderAnalysis(result) {
-    const trips = result.trips || [], tolls = result.toll_reimbursements || [], parking = result.parking_reimbursements || [];
-    const groups = result.driver_groups || [];
+    const trips = Array.isArray(result.trips) ? result.trips : [];
+    const tolls = Array.isArray(result.toll_reimbursements) ? result.toll_reimbursements : [];
+    const parking = Array.isArray(result.parking_reimbursements) ? result.parking_reimbursements : [];
+    const groups = Array.isArray(result.driver_groups) ? result.driver_groups : [];
     let html = `<div class="result-section"><h3>Batch Overview</h3><div class="result-item">
         <p><strong>Drivers identified:</strong> ${groups.length}</p>
         <p><strong>Documents:</strong> ${result.documents_processed || 0} / ${result.documents_received || result.documents_processed || 0}</p>
