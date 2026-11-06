@@ -339,29 +339,50 @@ batchList.addEventListener("click", async event => {
 // AI ANALYSIS
 // --------------------------------------------------
 
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 async function analyzeBatch(batchId) {
-    if (!confirm("Start AI analysis for this batch?")) {
-        return;
+    if (!confirm("Queue AI analysis for this batch? You can leave the page while it runs.")) return;
+    analysisResults.innerHTML = '<p class="empty-state">Queueing analysis...</p>';
+    await apiRequest(`/api/analyze/${encodeURIComponent(batchId)}`, { method: "POST" });
+    await loadBatches();
+    await pollAnalysis(batchId);
+}
+
+async function pollAnalysis(batchId) {
+    analysisResults.innerHTML = '<p class="empty-state">Analysis queued. Waiting for the worker...</p>';
+    while (true) {
+        const state = await apiRequest(`/api/results/${encodeURIComponent(batchId)}`);
+        if (state.status === "completed" && state.result) {
+            renderAnalysis(state.result);
+            await loadBatches();
+            return;
+        }
+        if (state.status === "failed" || state.status === "queue_failed") {
+            analysisResults.innerHTML = `<div class="result-item"><h3>Analysis ${escapeHTML(state.status)}</h3><p>${escapeHTML(state.error || "The worker could not complete this batch.")}</p></div>`;
+            await loadBatches();
+            return;
+        }
+        analysisResults.innerHTML = `<p class="empty-state">Analysis ${escapeHTML(state.status || "pending")}... Checking again in 5 seconds.</p>`;
+        await wait(5000);
     }
-
-    analysisResults.innerHTML = `
-        <p class="empty-state">
-            AI analysis is running. Please wait...
-        </p>
-    `;
-
-    const result = await apiRequest(
-        `/api/analyze/${encodeURIComponent(batchId)}`,
-        { method: "POST" }
-    );
-
-    renderAnalysis(result.result);
-
-    alert("Analysis completed. Review the results carefully.");
 }
 
 // --------------------------------------------------
 // DISPLAY ANALYSIS
+// --------------------------------------------------
+
+async function loadResults(batchId) {
+    const state = await apiRequest(`/api/results/${encodeURIComponent(batchId)}`);
+    if (state.status === "completed" && state.result) renderAnalysis(state.result);
+    else if (["failed", "queue_failed"].includes(state.status)) {
+        analysisResults.innerHTML = `<div class="result-item"><h3>Analysis ${escapeHTML(state.status)}</h3><p>${escapeHTML(state.error || "The worker could not complete this batch.")}</p></div>`;
+    } else {
+        await pollAnalysis(batchId);
+    }
+}
+
+
 // --------------------------------------------------
 
 async function loadResults(batchId) {
