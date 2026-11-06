@@ -1,0 +1,160 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6WS Trip Encoder</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<header class="topbar">
+    <div class="brand">
+        <div class="brand-icon">6WS</div>
+        <div>
+            <h1>6WS Trip Encoder</h1>
+            <p>AI-Powered Trip & Reimbursement Processing</p>
+        </div>
+    </div>
+
+    <div class="system-status">
+        <span class="status-dot"></span>
+        <span id="systemStatus">Checking system...</span>
+    </div>
+</header>
+
+<main class="container">
+
+    <section class="welcome">
+        <h2>Driver Document Processing</h2>
+        <p>
+            Upload trip tickets, toll reimbursements, and parking
+            reimbursements. Analyze the documents, review the results,
+            and approve them for spreadsheet export.
+        </p>
+    </section>
+
+    <section class="stats-grid">
+
+        <div class="stat-card">
+            <span class="stat-label">Total Batches</span>
+            <strong id="batchCount">0</strong>
+        </div>
+
+        <div class="stat-card">
+            <span class="stat-label">Documents Uploaded</span>
+            <strong id="documentCount">0</strong>
+        </div>
+
+        <div class="stat-card">
+            <span class="stat-label">Pending Review</span>
+            <strong id="pendingCount">0</strong>
+        </div>
+
+    </section>
+
+    <section class="panel upload-panel">
+
+        <div class="panel-heading">
+            <div>
+                <h2>Upload Driver Documents</h2>
+                <p>Select multiple PDF documents for one processing batch.</p>
+            </div>
+        </div>
+
+        <div class="upload-area" id="dropArea">
+            <div class="upload-icon">↑</div>
+
+            <h3>Drop PDF files here</h3>
+            <p>or select files from your computer</p>
+
+            <input
+                type="file"
+                id="pdfFiles"
+                accept=".pdf,application/pdf"
+                multiple
+                hidden
+            >
+
+            <button
+                class="primary-button"
+                id="selectFilesButton"
+                type="button"
+            >
+                Select PDF Files
+            </button>
+
+            <p class="file-note">
+                Supported documents: Trip Tickets, Toll Reimbursements,
+                Parking Reimbursements
+            </p>
+        </div>
+
+        <div id="selectedFiles" class="selected-files"></div>
+
+        <button
+            class="primary-button full-button"
+            id="uploadButton"
+            type="button"
+            disabled
+        >
+            Upload Documents
+        </button>
+
+        <div id="uploadMessage" class="message"></div>
+
+    </section>
+
+    <section class="panel">
+
+        <div class="panel-heading">
+            <div>
+                <h2>Processing Batches</h2>
+                <p>Review uploaded documents and start AI analysis.</p>
+            </div>
+
+            <button
+                class="secondary-button"
+                id="refreshButton"
+                type="button"
+            >
+                Refresh
+            </button>
+        </div>
+
+        <div id="batchList" class="batch-list">
+            <p class="empty-state">Loading batches...</p>
+        </div>
+
+    </section>
+
+    <section class="panel">
+
+        <div class="panel-heading">
+            <div>
+                <h2>Analysis Results</h2>
+                <p>Inspect extracted trips and reimbursement records.</p>
+            </div>
+        </div>
+
+        <div id="analysisResults">
+            <p class="empty-state">
+                Select a batch and run analysis to see results here.
+            </p>
+        </div>
+
+    </section>
+
+</main>
+
+<footer>
+    <p>6WS Trip Encoder · Version 1.0.0</p>
+    <p>AI results require human review before export.</p>
+</footer>
+
+<script src="/static/app.js"></script>
+
+</body>
+</html>
