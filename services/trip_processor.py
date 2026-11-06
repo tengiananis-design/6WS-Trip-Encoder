@@ -22,9 +22,14 @@ def is_soc_location(location: str) -> bool:
 def _same_soc(origin: str, destination: str) -> bool:
     pattern = re.compile(r"\bSOC\s*(\d+)\b", re.IGNORECASE)
     left, right = pattern.search(origin or ""), pattern.search(destination or "")
-    return bool(left and right and left.group(1) == right.group(1)
-                and normalize_location(origin).upper() == normalize_location(destination).upper())
-
+    if not left or not right or left.group(1) != right.group(1):
+        return False
+    # Treat "SOC 6" and "SOC 6 PARKING" as the same SOC location.
+    clean_left = re.sub(r"\bPARKING\b", "", normalize_location(origin), flags=re.IGNORECASE)
+    clean_right = re.sub(r"\bPARKING\b", "", normalize_location(destination), flags=re.IGNORECASE)
+    clean_left = re.sub(r"\s+", " ", clean_left).strip().upper()
+    clean_right = re.sub(r"\s+", " ", clean_right).strip().upper()
+    return clean_left == clean_right
 
 def determine_movement_type(origin: str, destination: str) -> str:
     origin = normalize_location(origin)
